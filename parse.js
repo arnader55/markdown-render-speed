@@ -173,7 +173,9 @@ function cleanUrl(href) {
   try {
     url = encodeURI(decodeURIComponent(href));
   } catch (e) {
-    return '';
+    // A stray '%' (not a valid escape) does not wipe the URL: encode
+    // the raw href, but keep '%' itself as-is (marked leaves it).
+    url = encodeURI(href.replace(/%/g, '\u0000')).replace(/%00/g, '%');
   }
   const m = url.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
   if (m) {
@@ -568,7 +570,7 @@ function parseInline(src, refs) {
       const end = scanDomain(src, i + 4);
       if (end < 0) return null;
       // The character after the domain must not extend it.
-      if (end < n2 && (isAlnum(src[end]) || src[end] === '-' || src[end] === '_')) return null;
+      if (end < n2 && (isAlnum(src[end]) || src[end] === '-')) return null;
       let j = end;
       if (src[j] === '/') {
         while (j < n2 && !isSpace(src[j]) && src[j] !== '<' && !isEntityStart(src, j)) j++;
@@ -588,7 +590,7 @@ function parseInline(src, refs) {
       if (src.startsWith('//', j)) {
         const dEnd = scanDomain(src, j + 2);
         if (dEnd < 0) return tryEmail(src, i);
-        if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-' || src[dEnd] === '_')) return tryEmail(src, i);
+        if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-')) return tryEmail(src, i);
         j = dEnd;
         while (j < n2 && !isSpace(src[j]) && src[j] !== '<' && !isEntityStart(src, j)) j++;
         j = trimAutolinkEnd(src, i, j);
@@ -609,9 +611,17 @@ function parseInline(src, refs) {
         const text = src.slice(i, e);
         return { href: text, text, next: e };
       }
+      // The email was invalid, and a domain cannot contain '@': if an
+      // '@' follows before any path separator, this is a failed email,
+      // not a domain, so no autolink forms at all.
+      {
+        let s = j;
+        while (s < n2 && !isSpace(src[s]) && src[s] !== '<' && src[s] !== '/') s++;
+        if (src.slice(j, s).includes('@')) return tryEmail(src, i);
+      }
       const dEnd = scanDomain(src, j);
       if (dEnd >= 0) {
-        if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-' || src[dEnd] === '_')) return tryEmail(src, i);
+        if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-')) return tryEmail(src, i);
         let e = dEnd;
         while (e < n2 && !isSpace(src[e]) && src[e] !== '<' && !isEntityStart(src, e)) e++;
         e = trimAutolinkEnd(src, i, e);
@@ -1273,8 +1283,22 @@ function splitTableRow(row) {
       let k = i;
       while (k < n && row[k] === '`') k++;
       const run = k - i;
-      if (inCode === 0) inCode = run;
-      else if (inCode === run) inCode = 0;
+      if (inCode === 0) {
+        // Only open a code span when a matching closing run exists;
+        // an unmatched backtick is literal text and must not stop
+        // later pipes from splitting the row.
+        let j = k;
+        let found = false;
+        while (j < n) {
+          if (row[j] === '`') {
+            let e = j;
+            while (e < n && row[e] === '`') e++;
+            if (e - j === run) { found = true; break; }
+            j = e;
+          } else j++;
+        }
+        if (found) inCode = run;
+      } else if (inCode === run) inCode = 0;
       cur += row.slice(i, k);
       i = k;
       continue;
@@ -1819,6 +1843,12 @@ function parseBlocks(lines, refs) {
           col = col + e.minIndent;
           continue;
         }
+        // Inside a fenced code block, a line is code content even when
+        // it is not indented to the item's content level: the block
+        // runs to its closing fence, so do not close the item (or the
+        // code block) for such a line.
+        const t0 = stack[stack.length - 1];
+        if (t0.type === 'code' && t0.fenced) continue;
         failStrip = indentCols(s, col);
         failedAt = k;
         break;
