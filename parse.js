@@ -525,7 +525,8 @@ function parseInline(src, refs) {
       if (j >= n2 || !isAlnum(src[j])) return lastEnd;
       let k = j;
       while (k < n2 && (isAlnum(src[k]) || src[k] === '-')) k++;
-      if (src[k - 1] === '-') return lastEnd; // label may not end with '-'
+      if (src[k - 1] === '-') return -1; // a label may not end with '-',
+        // and the whole domain is invalid (no truncating to a prefix)
       j = k;
       if (j < n2 && src[j] === '.') {
         dots++;
@@ -538,6 +539,23 @@ function parseInline(src, refs) {
     }
     if (dots === 0) return -1;
     return lastEnd;
+  }
+
+  // True when an entity-like reference (&word;, &#123;, &#x1F;) starts
+  // at src[j]. An extended autolink's path stops before one.
+  function isEntityStart(src, j) {
+    if (src[j] !== '&') return false;
+    let k = j + 1;
+    if (src[k] === '#') {
+      k++;
+      if (src[k] === 'x' || src[k] === 'X') k++;
+      const start = k;
+      while (k < src.length && isAlnum(src[k])) k++;
+      return k > start && src[k] === ';';
+    }
+    const start = k;
+    while (k < src.length && (isAlnum(src[k]))) k++;
+    return k > start && src[k] === ';';
   }
 
   // Try an extended autolink at i (www., scheme://, scheme:email, email).
@@ -553,7 +571,7 @@ function parseInline(src, refs) {
       if (end < n2 && (isAlnum(src[end]) || src[end] === '-' || src[end] === '_')) return null;
       let j = end;
       if (src[j] === '/') {
-        while (j < n2 && !isSpace(src[j]) && src[j] !== '<') j++;
+        while (j < n2 && !isSpace(src[j]) && src[j] !== '<' && !isEntityStart(src, j)) j++;
       }
       j = trimAutolinkEnd(src, i, j);
       if (j <= i + 4) return null;
@@ -572,7 +590,7 @@ function parseInline(src, refs) {
         if (dEnd < 0) return tryEmail(src, i);
         if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-' || src[dEnd] === '_')) return tryEmail(src, i);
         j = dEnd;
-        while (j < n2 && !isSpace(src[j]) && src[j] !== '<') j++;
+        while (j < n2 && !isSpace(src[j]) && src[j] !== '<' && !isEntityStart(src, j)) j++;
         j = trimAutolinkEnd(src, i, j);
         const text = src.slice(i, j);
         return { href: text, text, next: j };
@@ -595,7 +613,7 @@ function parseInline(src, refs) {
       if (dEnd >= 0) {
         if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-' || src[dEnd] === '_')) return tryEmail(src, i);
         let e = dEnd;
-        while (e < n2 && !isSpace(src[e]) && src[e] !== '<') e++;
+        while (e < n2 && !isSpace(src[e]) && src[e] !== '<' && !isEntityStart(src, e)) e++;
         e = trimAutolinkEnd(src, i, e);
         const text = src.slice(i, e);
         return { href: text, text, next: e };
@@ -774,7 +792,7 @@ function parseInline(src, refs) {
   function isBoundaryBefore(i) {
     if (i === 0) return true;
     const c = src[i - 1];
-    return isSpace(c) || c === '(' || c === '[';
+    return isSpace(c) || c === '(' || c === '[' || c === '<';
   }
 
   while (scanPos < n) {
@@ -920,7 +938,7 @@ function parseInline(src, refs) {
       let k = i;
       while (k < n && src[k] === '~') k++;
       const run = k - i;
-      if (run >= 2) {
+      if (run === 1 || run === 2) {
         const before = i > 0 ? src[i - 1] : '\n';
         const after = k < n ? src[k] : '\n';
         const beforeWs = isUnicodeWhitespace(before);
@@ -936,8 +954,10 @@ function parseInline(src, refs) {
         scanPos = k;
         continue;
       }
-      buf += '~';
-      scanPos = i + 1;
+      // A run of 3+ tildes is literal text, never a strikethrough
+      // delimiter.
+      buf += '~'.repeat(run);
+      scanPos = k;
       continue;
     }
 
@@ -990,6 +1010,9 @@ function parseInline(src, refs) {
 function matchHtmlTag(src, i) {
   const n = src.length;
   const rest = src.slice(i, i + 512);
+  // Abruptly-closed comments: <!--> and <!---> are complete comments.
+  if (rest.startsWith('<!-->')) return { text: '<!-->', next: i + 5 };
+  if (rest.startsWith('<!--->')) return { text: '<!--->', next: i + 6 };
   let m = rest.match(/^<!--(?:(?!-->)[\s\S])*?-->/);
   if (m) return { text: m[0], next: i + m[0].length };
   m = rest.match(/^<\?[\s\S]*?\?>/);
@@ -998,7 +1021,12 @@ function matchHtmlTag(src, i) {
   if (m) return { text: m[0], next: i + m[0].length };
   m = rest.match(/^<!\[CDATA\[[\s\S]*?\]\]>/);
   if (m) return { text: m[0], next: i + m[0].length };
-  m = rest.match(/^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^ \t\n"'=<>`]+|'[^'\n]*'|"[^"\n]*"))?)*\s*\/?>/);
+  // Quoted attribute values may span lines. A closing tag may not
+  // carry attributes.
+  const attr = `(?:\\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\\s*=\\s*(?:[^ \\t\\n"'=<>\\\`]+|'[^']*'|"[^"]*"))?)*`;
+  m = rest.match(new RegExp(`^<[A-Za-z][A-Za-z0-9-]*${attr}\\s*\\/?>`));
+  if (m) return { text: m[0], next: i + m[0].length };
+  m = rest.match(/^<\/[A-Za-z][A-Za-z0-9-]*\s*>/);
   if (m) return { text: m[0], next: i + m[0].length };
   return null;
 }
@@ -1237,7 +1265,10 @@ function splitTableRow(row) {
   let inCode = 0; // length of the open code run, 0 when not in one
   while (i < n) {
     const c = row[i];
-    if (c === '\\' && i + 1 < n && row[i + 1] === '|') { cur += '\\|'; i += 2; continue; }
+    // An escaped pipe does not split the cell, and the backslash is
+    // dropped here (before inline parsing), so `\|` inside a code
+    // span still renders as a bare '|'.
+    if (c === '\\' && i + 1 < n && row[i + 1] === '|') { cur += '|'; i += 2; continue; }
     if (c === '`') {
       let k = i;
       while (k < n && row[k] === '`') k++;
@@ -1326,8 +1357,10 @@ const HTML_BLOCK_TAGS = new Set(
 // Returns {kind, end} for an HTML block start, or null. kind 1-6 can
 // interrupt a paragraph; kind 7 cannot. `end` names how the block ends.
 // A complete open or closing tag (no '<' inside attribute values).
-// `rest` here already has the leading '<' stripped.
-const COMPLETE_TAG = /^\/?[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:"[^"<]*"|'[^'<]*'|[^\s"'=<>`]+))?)*[ \t]*\/?>/;
+// `rest` here already has the leading '<' stripped. A closing tag
+// may not carry attributes.
+const COMPLETE_OPEN_TAG = /^[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t]*=[ \t]*(?:"[^"<]*"|'[^'<]*'|[^\s"'=<>`]+))?)*[ \t]*\/?>/;
+const COMPLETE_CLOSE_TAG = /^\/[A-Za-z][A-Za-z0-9-]*[ \t]*>/;
 
 // Does this line end an HTML block of the given kind? Kind 1 ends at
 // its closing tag; kinds 2-5 end at their end marker.
@@ -1353,7 +1386,7 @@ function htmlBlockStart(s) {
   mm = /^(\/?)([A-Za-z][A-Za-z0-9-]*)(?:[ \t/>]|$)/.exec(rest);
   if (mm && HTML_BLOCK_TAGS.has(mm[2].toLowerCase())) return { kind: 6, end: 'blank' };
   // Type 7: a complete open or closing tag, alone on the line.
-  const tag = COMPLETE_TAG.exec(rest);
+  const tag = COMPLETE_OPEN_TAG.exec(rest) || COMPLETE_CLOSE_TAG.exec(rest);
   if (tag && /^[ \t]*$/.test(rest.slice(tag[0].length))) return { kind: 7, end: 'blank' };
   return null;
 }
@@ -1662,10 +1695,12 @@ function parseBlocks(lines, refs) {
       }
       const itemNode = { type: 'item', children: [], task: null, blankAfter: false };
       if (!li.empty) {
-        const taskM = /^(\[[ xX]\])(?:[ \t]+(.*)|[ \t]*)$/.exec(li.content);
+        const taskM = /^(\[[ xX]\])(?:[ \t]|$)/.exec(li.content);
         if (taskM) {
           itemNode.task = taskM[1][1] === ' ' ? false : true;
-          li.content = (taskM[2] || '').replace(/^[ \t]+/, '');
+          // Keep everything after the checkbox, including the space,
+          // so the checkbox is followed by ' foo'.
+          li.content = li.content.slice(3);
           li.empty = li.content === '';
         }
       }
@@ -1939,16 +1974,20 @@ function renderBlock(b, refs, tightList) {
         const a = b.aligns[i];
         out += '<th' + (a ? ' align="' + a + '"' : '') + '>' + parseInline(b.header[i], refs) + '</th>\n';
       }
-      out += '</tr>\n</thead>\n<tbody>';
-      for (const row of b.rows) {
-        out += '<tr>\n';
-        for (let i = 0; i < row.length; i++) {
-          const a = b.aligns[i];
-          out += '<td' + (a ? ' align="' + a + '"' : '') + '>' + parseInline(row[i], refs) + '</td>\n';
+      out += '</tr>\n</thead>\n';
+      if (b.rows.length) {
+        out += '<tbody>';
+        for (const row of b.rows) {
+          out += '<tr>\n';
+          for (let i = 0; i < row.length; i++) {
+            const a = b.aligns[i];
+            out += '<td' + (a ? ' align="' + a + '"' : '') + '>' + parseInline(row[i], refs) + '</td>\n';
+          }
+          out += '</tr>\n';
         }
-        out += '</tr>\n';
+        out += '</tbody>';
       }
-      return out + '</tbody></table>\n';
+      return out + '</table>\n';
     }
     default:
       return '';
