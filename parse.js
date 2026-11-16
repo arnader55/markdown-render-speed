@@ -251,6 +251,11 @@ function parseInline(src, refs) {
   // inside it) when an inner '*' pair's closer is followed by an
   // alphanumeric character.
   const formedStar = [];
+  // Marked quirk: a link (inline, or collapsed reference) whose text
+  // holds a code-span pair with exactly one run of length 1 casts a
+  // shadow over later emphasis in this block. The position just after
+  // the first such link, or -1 when there is none.
+  let shadowBtLinkEnd = -1;
 
   function appendNode(node) {
     tail.next = node; node.prev = tail; tail = node;
@@ -424,6 +429,19 @@ function parseInline(src, refs) {
             }
           }
           opener = opener.prev;
+        }
+        if (found) {
+          // Marked quirk (bt-link shadow): after a link whose text
+          // holds a code-span pair with exactly one run of length 1,
+          // an emphasis pair whose closer is after that link and has
+          // a backtick after it stays literal. Only the top-level
+          // pass is affected (link-text emphasis is processed with a
+          // stop node and is exempt).
+          if (stopNode === null && shadowBtLinkEnd >= 0 &&
+              shadowBtLinkEnd <= closer.pos &&
+              src.indexOf('`', closer.pos + closer.len) >= 0) {
+            found = null;
+          }
         }
         if (found) {
           const use = (found.n >= 2 && closer.n >= 2) ? 2 : 1;
@@ -923,6 +941,33 @@ function parseInline(src, refs) {
     return true;
   }
 
+  // Whether a link's raw text holds a code-span pair (read the way a
+  // label reads it: a backtick run, content with no backtick, then the
+  // next backtick run of any length) with exactly one of the two runs
+  // of length 1. Such a link casts the bt-link shadow (see
+  // processEmphasis).
+  function linkTextHasSingleMismatch(text) {
+    let j = 0;
+    while (j < text.length) {
+      const c = text[j];
+      if (c === '\\' && j + 1 < text.length) { j += 2; continue; }
+      if (c === '`') {
+        let k = j;
+        while (k < text.length && text[k] === '`') k++;
+        const o = k - j;
+        let m = k;
+        while (m < text.length && text[m] !== '`') m++;
+        if (m >= text.length) return false;
+        let e = m;
+        while (e < text.length && text[e] === '`') e++;
+        if ((o === 1) !== (e - m === 1)) return true;
+        j = e; continue;
+      }
+      j++;
+    }
+    return false;
+  }
+
   function tryFormLink(closerPos) {
     // Nearest active '[' or '![' delimiter.
     let opener = null;
@@ -933,6 +978,7 @@ function parseInline(src, refs) {
     let dest = null;
     let title = null;
     let isInline = false;
+    let isCollapsedRef = false;
     let next = closerPos + 1; // shortcut reference: continue after ']'
     const after = closerPos + 1;
     if (src[after] === '(') {
@@ -943,7 +989,7 @@ function parseInline(src, refs) {
       let label = null;
       if (src[after] === '[') {
         const r = scanBracketLabel(src, after);
-        if (r) { label = r.label; next = r.next; }
+        if (r) { label = r.label; next = r.next; isCollapsedRef = r.label === ''; }
       }
       if (label === null || label === '') {
         // Shortcut or collapsed reference: the label is the link text
@@ -974,6 +1020,15 @@ function parseInline(src, refs) {
       }
       removeDelim(opener);
       return false;
+    }
+    // Marked quirk (bt-link shadow): an inline link, or a collapsed
+    // reference, whose text holds a code-span pair with exactly one
+    // run of length 1 casts a shadow over later emphasis in this
+    // block (see processEmphasis). Full and shortcut references do
+    // not cast it.
+    if ((isInline || isCollapsedRef) && shadowBtLinkEnd < 0 &&
+        linkTextHasSingleMismatch(src.slice(opener.pos + (opener.image ? 2 : 1), closerPos))) {
+      shadowBtLinkEnd = next;
     }
     const href = cleanUrl(unescapePunct(dest));
     const cleanTitle = title === null ? null : unescapePunct(title);
@@ -1116,6 +1171,82 @@ function parseInline(src, refs) {
 
   // ---- main scan ------------------------------------------------------------
 
+  // Skip a code span the way a link label reads it: a backtick run,
+  // content with no backtick, then the next backtick run (any length).
+  // Returns the position just after the closing run, or -1 when there
+  // is no closing run.
+  function skipLabelCodeSpan(j) {
+    let k = j;
+    while (k < n && src[k] === '`') k++;
+    let m = k;
+    while (m < n && src[m] !== '`') m++;
+    if (m >= n) return -1;
+    let e = m;
+    while (e < n && src[e] === '`') e++;
+    return e;
+  }
+
+  // The ']' closing an active bracket opener, read the way a link
+  // label reads it: code spans (any closer length) and nested brackets
+  // are skipped; a run of two or more backticks right before the ']'
+  // also counts. Returns -1 when the bracket has no closer.
+  function findBracketCloser(opener) {
+    let depth = 0;
+    let j = opener.pos + (opener.image ? 2 : 1);
+    while (j < n) {
+      const c = src[j];
+      if (c === '\\' && j + 1 < n) { j += 2; continue; }
+      if (c === '`') {
+        let k = j;
+        while (k < n && src[k] === '`') k++;
+        if (k - j >= 2 && src[k] === ']') {
+          if (depth === 0) return k;
+          depth--; j = k + 1; continue;
+        }
+        const e = skipLabelCodeSpan(j);
+        if (e < 0) return -1;
+        j = e; continue;
+      }
+      if (c === '[') { depth++; j++; continue; }
+      if (c === ']') {
+        if (depth === 0) return j;
+        depth--; j++; continue;
+      }
+      j++;
+    }
+    return -1;
+  }
+
+  // Whether the ']' at `pos` lies inside a code span of the active
+  // bracket opener's label (the span's closing run is after the ']'):
+  // such a ']' does not close the link.
+  function closerInCodeSpan(opener, pos) {
+    let j = opener.pos + (opener.image ? 2 : 1);
+    while (j < pos) {
+      const c = src[j];
+      if (c === '\\' && j + 1 < pos) { j += 2; continue; }
+      if (c === '`') {
+        let k = j;
+        while (k < n && src[k] === '`') k++;
+        if (k - j >= 2 && src[k] === ']' && k === pos) return false;
+        const e = skipLabelCodeSpan(j);
+        if (e < 0) return false;
+        if (pos < e) return true;
+        j = e; continue;
+      }
+      j++;
+    }
+    return false;
+  }
+
+  // The nearest active '[' or '![' delimiter, or null.
+  function nearestBracket() {
+    for (let d = dTail; d; d = d.prev) {
+      if (d.type === 'bracket' && d.active) return d;
+    }
+    return null;
+  }
+
   let scanPos = 0;
   function isBoundaryBefore(i) {
     if (i === 0) return true;
@@ -1168,6 +1299,18 @@ function parseInline(src, refs) {
         } else j++;
       }
       if (found >= 0) {
+        // A code span must not swallow the ']' that closes an active
+        // link bracket: when the bracket's closer lies before this
+        // span's closing run, the backticks stay literal.
+        const opener = nearestBracket();
+        if (opener) {
+          const closer = findBracketCloser(opener);
+          if (closer >= 0 && found > closer) {
+            buf += '`'.repeat(run);
+            scanPos = k;
+            continue;
+          }
+        }
         let content = src.slice(k, found).replace(/\n/g, ' ');
         if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) {
           content = content.slice(1, -1);
@@ -1237,8 +1380,14 @@ function parseInline(src, refs) {
 
     if (ch === ']') {
       flushText();
-      // The closer node is the node we just flushed (or the tail if the
-      // buffer was empty and the last node is the closer's text).
+      // A ']' inside a code span of the active bracket's label does
+      // not close the link: keep the opener active, keep it literal.
+      const opener = nearestBracket();
+      if (opener && closerInCodeSpan(opener, i)) {
+        buf += ']';
+        scanPos = i + 1;
+        continue;
+      }
       const formed = tryFormLink(i);
       if (formed) continue;
       // Not a link: the ']' is literal text.
