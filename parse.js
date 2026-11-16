@@ -695,6 +695,30 @@ function parseInline(src, refs) {
     return k > start && src[k] === ';';
   }
 
+  // Scan an extended autolink's path from j to the first whitespace,
+  // '<', or entity start. A '(' is allowed only as part of a balanced
+  // (possibly nested) group inside the path: an unmatched '(' ends the
+  // path just before it.
+  function scanAutolinkPath(src, j) {
+    const n2 = src.length;
+    while (j < n2 && !isSpace(src[j]) && src[j] !== '<' && !isEntityStart(src, j)) {
+      if (src[j] === '(') {
+        let depth = 1;
+        let k = j + 1;
+        while (k < n2 && !isSpace(src[k]) && src[k] !== '<' && !isEntityStart(src, k)) {
+          if (src[k] === '(') depth++;
+          else if (src[k] === ')') { depth--; if (depth === 0) break; }
+          k++;
+        }
+        if (depth !== 0) return j;
+        j = k + 1;
+      } else {
+        j++;
+      }
+    }
+    return j;
+  }
+
   // Try an extended autolink at i (www., scheme://, scheme:email, email).
   // Returns {href, text, next} or null. `boundary` says the previous
   // character is start/whitespace/'('/'['.
@@ -708,7 +732,7 @@ function parseInline(src, refs) {
       if (end < n2 && (isAlnum(src[end]) || src[end] === '-')) return null;
       let j = end;
       if (src[j] === '/') {
-        while (j < n2 && !isSpace(src[j]) && src[j] !== '<' && !isEntityStart(src, j)) j++;
+        j = scanAutolinkPath(src, j);
       }
       j = trimAutolinkEnd(src, i, j);
       if (j <= i + 4) return null;
@@ -727,7 +751,7 @@ function parseInline(src, refs) {
         if (dEnd < 0) return tryEmail(src, i);
         if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-')) return tryEmail(src, i);
         j = dEnd;
-        while (j < n2 && !isSpace(src[j]) && src[j] !== '<' && !isEntityStart(src, j)) j++;
+        j = scanAutolinkPath(src, j);
         j = trimAutolinkEnd(src, i, j);
         const text = src.slice(i, j);
         return { href: text, text, next: j };
@@ -757,8 +781,7 @@ function parseInline(src, refs) {
       const dEnd = scanDomain(src, j);
       if (dEnd >= 0) {
         if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-')) return tryEmail(src, i);
-        let e = dEnd;
-        while (e < n2 && !isSpace(src[e]) && src[e] !== '<' && !isEntityStart(src, e)) e++;
+        let e = scanAutolinkPath(src, dEnd);
         e = trimAutolinkEnd(src, i, e);
         const text = src.slice(i, e);
         return { href: text, text, next: e };
@@ -1502,45 +1525,22 @@ function extractLinkDefs(text, refs) {
 
 // ---- GFM tables ------------------------------------------------------------
 
-// Split a table row on unescaped pipes that are not inside code spans.
-// Returns the cell strings, or null when the row has no cells.
+// Split a table row on unescaped pipes. Only an escaped pipe (\|)
+// avoids a split (and the backslash is dropped here, before inline
+// parsing, so `\|` inside a code span still renders as a bare '|').
+// A pipe inside a code span or an HTML tag still splits the row.
 function splitTableRow(row) {
   const cells = [];
   let cur = '';
   let i = 0;
   const n = row.length;
-  let inCode = 0; // length of the open code run, 0 when not in one
   while (i < n) {
     const c = row[i];
     // An escaped pipe does not split the cell, and the backslash is
     // dropped here (before inline parsing), so `\|` inside a code
     // span still renders as a bare '|'.
     if (c === '\\' && i + 1 < n && row[i + 1] === '|') { cur += '|'; i += 2; continue; }
-    if (c === '`') {
-      let k = i;
-      while (k < n && row[k] === '`') k++;
-      const run = k - i;
-      if (inCode === 0) {
-        // Only open a code span when a matching closing run exists;
-        // an unmatched backtick is literal text and must not stop
-        // later pipes from splitting the row.
-        let j = k;
-        let found = false;
-        while (j < n) {
-          if (row[j] === '`') {
-            let e = j;
-            while (e < n && row[e] === '`') e++;
-            if (e - j === run) { found = true; break; }
-            j = e;
-          } else j++;
-        }
-        if (found) inCode = run;
-      } else if (inCode === run) inCode = 0;
-      cur += row.slice(i, k);
-      i = k;
-      continue;
-    }
-    if (c === '|' && inCode === 0) {
+    if (c === '|') {
       cells.push(cur);
       cur = '';
       i++;
