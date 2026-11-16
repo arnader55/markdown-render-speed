@@ -1817,8 +1817,28 @@ function parseBlocks(lines, refs) {
   const stack = [{ type: 'doc', node: doc }];
 
   function top() { return stack[stack.length - 1]; }
-  // Set at the top of each line iteration; see the for loop below.
-  let nextLineBlank = false;
+  // The raw text of the line after the one being processed, set at the
+  // top of each line iteration; see the for loop below.
+  let nextLineRaw = null;
+  // Is the next line blank for an HTML block ending on this line? The
+  // raw line counts, and so does a line of only blockquote markers: it
+  // is an empty line inside the quote. A whitespace-only line does not
+  // count. Evaluated when the block ends, so the open containers (the
+  // current stack) are the ones that strip the markers.
+  function nextLineIsBlank() {
+    if (nextLineRaw === null) return false;
+    if (nextLineRaw === '') return true;
+    let s = nextLineRaw;
+    let stripped = false;
+    for (let k = 1; k < stack.length; k++) {
+      if (stack[k].type !== 'blockquote') continue;
+      const m = /^[ \t]{0,3}>[ \t]?/.exec(s);
+      if (!m) return false;
+      s = s.slice(m[0].length);
+      stripped = true;
+    }
+    return stripped && s === '';
+  }
   function deepestContainer() {
     for (let k = stack.length - 1; k >= 0; k--) {
       const e = stack[k];
@@ -2014,7 +2034,7 @@ function parseBlocks(lines, refs) {
       stack.push({ type: 'html', node, end: html.end, kind: html.kind });
       // A kind 1-5 block can already end on its first line.
       if (htmlLineEnds(html.kind, html.end, s)) {
-        node.noTrailingNl = nextLineBlank;
+        node.noTrailingNl = nextLineIsBlank();
         stack.pop();
       }
       return 'leaf';
@@ -2059,10 +2079,12 @@ function parseBlocks(lines, refs) {
         stack.push({ type: 'list', node: listNode });
       }
       // A blank line after the previous item makes the list loose.
+      // Remember it on the item: an HTML block that ends the item
+      // keeps its trailing newline only when such a blank line follows.
       const items = listNode.items;
       if (items.length) {
         const prevItem = items[items.length - 1];
-        if (prevItem.blankAfter) { listNode.loose = true; prevItem.blankAfter = false; }
+        if (prevItem.blankAfter) { listNode.loose = true; prevItem.blankLineAfter = true; prevItem.blankAfter = false; }
       }
       const itemNode = { type: 'item', children: [], task: null, blankAfter: false };
       if (!li.empty) {
@@ -2114,10 +2136,7 @@ function parseBlocks(lines, refs) {
 
   for (let ln = 0; ln < lines.length; ln++) {
     const line = lines[ln];
-    // Whether the line after this one is empty: an HTML block of kind
-    // 1-5 that ends here loses its trailing newline when an empty line
-    // follows it. A whitespace-only line does not count as empty here.
-    nextLineBlank = ln + 1 < lines.length && lines[ln + 1] === '';
+    nextLineRaw = ln + 1 < lines.length ? lines[ln + 1] : null;
     if (isBlankLine(line)) {
       const t = top();
       // Whether a blockquote is open: a raw blank line closes it (and
@@ -2143,9 +2162,12 @@ function parseBlocks(lines, refs) {
         closeLeaf();
       } else if (t.type === 'code') {
         // A blank line in a code block keeps its whitespace past the
-        // block's indent (four columns for indented code, the fence's
-        // indent for fenced code).
-        t.node.lines.push(stripCols(line, t.fenced ? (t.fenceIndent || 0) : 4, 0));
+        // block's indent (four columns for indented code; for a
+        // backtick fence, up to fenceIndentChars whitespace characters;
+        // a tilde fence keeps the line as-is).
+        t.node.lines.push(t.fenced
+          ? (t.fenceCh === '`' ? stripWsChars(line, t.fenceIndentChars || 0) : line)
+          : stripCols(line, 4, 0));
       } else if (t.type === 'html') {
         // Only kinds 6 and 7 end at a blank line.
         closeLeaf();
@@ -2227,7 +2249,8 @@ function parseBlocks(lines, refs) {
     // A line that is empty after its containers matched is a blank
     // line inside those containers: it ends the open paragraph (or
     // code/html block) but the containers stay open. A whitespace-only
-    // remainder is NOT blank: it joins the paragraph as a line of spaces.
+    // remainder is a blank line for a paragraph too (handled just
+    // below); for code and HTML blocks it stays content.
     if (s === '') {
       if (failedAt >= 0) closeFrom(failedAt);
       const t2 = top();
@@ -2240,6 +2263,16 @@ function parseBlocks(lines, refs) {
       // The blank line is directly in a list item only when the item is
       // the innermost container left open; inside a blockquote it does
       // not loosen the item's list.
+      const t3 = top();
+      if (t3.type === 'item') t3.node.blankAfter = true;
+      continue;
+    }
+
+    // A line that is only whitespace after its containers matched is a
+    // blank line for an open paragraph (it ends the paragraph), but it
+    // stays code content for a code block and a line of an HTML block.
+    if (/^[ \t]+$/.test(s) && failedAt < 0 && top().type === 'paragraph') {
+      closeLeaf();
       const t3 = top();
       if (t3.type === 'item') t3.node.blankAfter = true;
       continue;
@@ -2350,16 +2383,17 @@ function parseBlocks(lines, refs) {
       if (t.type === 'html') {
         t.node.lines.push(cur);
         if (htmlLineEnds(t.kind, t.end, cur)) {
-          t.node.noTrailingNl = nextLineBlank;
+          t.node.noTrailingNl = nextLineIsBlank();
           closeLeaf();
         }
         // Kinds 6 and 7 end at a blank line, handled by the blank-line
         // branch above.
         break;
       }
-      // After a container was started, the line may be empty: it is a
-      // blank line within that container, not a paragraph.
-      if (cur === '') break;
+      // After a container was started, the line may be empty (or only
+      // whitespace): it is a blank line within that container, not a
+      // paragraph.
+      if (/^[ \t]*$/.test(cur)) break;
       const started = tryStartBlock(cur, false, curCol);
       if (started === 'container') continue;
       if (started === 'leaf') break;
@@ -2372,9 +2406,10 @@ function parseBlocks(lines, refs) {
   return doc;
 }
 
-// ---- rendering ---------------------------------------------------------------
-
-function renderBlock(b, refs, tightList) {
+// `htmlNl` overrides the trailing newline of an HTML block that is the
+// last descendant of a list item: 'keep' when a blank line follows the
+// item, 'drop' otherwise. Null leaves the block's own rule alone.
+function renderBlock(b, refs, tightList, htmlNl) {
   switch (b.type) {
     case 'paragraph':
       return '<p>' + parseInline(b.text, refs) + '</p>\n';
@@ -2388,16 +2423,24 @@ function renderBlock(b, refs, tightList) {
       }
       return out + '>' + escapeHtml(b.text) + '</code></pre>\n';
     }
-    case 'html':
+    case 'html': {
       // Kinds 1-5 keep the newline after their closing line, unless a
       // blank line follows the block; kinds 6 and 7 keep one only when
       // they run to the end of the input (trailingNl on the last leaf).
-      return b.lines.join('\n') + ((b.kind <= 5 && !b.noTrailingNl) || b.trailingNl ? '\n' : '');
+      // Inside a list item the item's blank line decides instead.
+      let nl = (b.kind <= 5 && !b.noTrailingNl) || b.trailingNl;
+      if (htmlNl === 'drop') nl = false;
+      else if (htmlNl === 'keep') nl = true;
+      return b.lines.join('\n') + (nl ? '\n' : '');
+    }
     case 'hr':
       return '<hr>\n';
     case 'blockquote': {
       let out = '<blockquote>\n';
-      for (const c of b.children) out += renderBlock(c, refs, false);
+      for (let i = 0; i < b.children.length; i++) {
+        out += renderBlock(b.children[i], refs, false,
+          i === b.children.length - 1 ? htmlNl : null);
+      }
       return out + '</blockquote>\n';
     }
     case 'list': {
@@ -2440,12 +2483,16 @@ function renderItem(item, refs, loose) {
   let out = '<li>';
   for (let i = 0; i < item.children.length; i++) {
     const child = item.children[i];
+    // An HTML block ending the item keeps its trailing newline only
+    // when a blank line follows the item.
+    const lastNl = i === item.children.length - 1
+      ? (item.blankLineAfter ? 'keep' : 'drop') : null;
     if (child.type === 'paragraph' && !loose) {
       out += (i === 0 ? checkbox : '') + parseInline(child.text, refs);
     } else if (child.type === 'paragraph') {
       out += '<p>' + (i === 0 ? checkbox : '') + parseInline(child.text, refs) + '</p>\n';
     } else {
-      out += (i === 0 ? checkbox : '') + renderBlock(child, refs, false);
+      out += (i === 0 ? checkbox : '') + renderBlock(child, refs, false, lastNl);
     }
   }
   if (!item.children.length) out += checkbox;
