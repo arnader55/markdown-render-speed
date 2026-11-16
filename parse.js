@@ -2009,6 +2009,13 @@ function parseBlocks(lines, refs) {
       for (let k = stack.length - 1; k >= 0; k--) {
         if (stack[k].type === 'blockquote') { bqIdx = k; break; }
       }
+      // A line that is exactly one tab is an empty table row, not a
+      // blank line, when the open paragraph is a table. Two or more
+      // tabs, or a tab with spaces, still ends the table.
+      if (line === '\t' && bqIdx < 0 && t.type === 'paragraph' && tryTable(t.node.lines)) {
+        t.node.lines.push(line);
+        continue;
+      }
       if (t.type === 'html' && t.kind < 6) {
         // HTML blocks of kinds 1-5 run to their end marker: a blank
         // line joins the block and closes no container.
