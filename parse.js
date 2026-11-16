@@ -2229,11 +2229,34 @@ function parseBlocks(lines, refs) {
       const t = top();
       if (t.type === 'paragraph') {
         if (!canInterruptParagraph(s, col)) {
-          // Lazy continuation: the line joins the paragraph. Its leading
-          // whitespace is stripped up to the amount the failed container
-          // match consumed; a level-1 setext underline that cannot
-          // convert the paragraph is indented four spaces instead.
-          let lazy = stripCols(s, failStrip, col);
+          // Lazy continuation: the line joins the paragraph. An outer
+          // container may have failed (e.g. a missing '>' marker),
+          // but inner list items the line satisfies still contribute
+          // their indent, which is stripped; any other leading
+          // whitespace is paragraph content and is preserved (leading
+          // tabs are expanded at the current column). A lazy line
+          // indented four or more after a failed blockquote loses
+          // four columns (the blockquote content indent). A level-1
+          // setext underline that cannot convert the paragraph is
+          // indented four spaces instead.
+          let lazy = s;
+          let lazyCol = col;
+          for (let k = failedAt + 1; k < stack.length; k++) {
+            const e = stack[k];
+            if (e.type === 'item' && indentCols(lazy, lazyCol) >= e.minIndent) {
+              lazy = stripCols(lazy, e.minIndent, lazyCol);
+              lazyCol += e.minIndent;
+            } else if (e.type === 'list') {
+              continue;
+            } else {
+              break;
+            }
+          }
+          if (indentCols(lazy, lazyCol) >= 4) {
+            lazy = stripCols(lazy, 4, lazyCol);
+            lazyCol += 4;
+          }
+          lazy = expandLeading(lazy, lazyCol);
           if (setextLevel(lazy, 0) === 1) lazy = '    ' + lazy;
           t.node.lines.push(lazy);
           continue;
@@ -2250,6 +2273,14 @@ function parseBlocks(lines, refs) {
       if (t.type === 'paragraph') {
         const setext = setextLevel(cur, curCol);
         if (setext) {
+          // A paragraph that is already a table is not converted to
+          // a setext heading: the underline line is a table row.
+          const joined = t.node.lines.join('\n');
+          const rest = extractLinkDefs(joined, refs);
+          if (tryTable(rest.split('\n'))) {
+            t.node.lines.push(cur);
+            break;
+          }
           // An empty paragraph (only link definitions) is dropped and
           // the underline becomes a paragraph of its own.
           if (convertParagraphToHeading(t, setext)) break;
