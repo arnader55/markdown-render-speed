@@ -2294,6 +2294,48 @@ function parseBlocks(lines, refs) {
     return 'none';
   }
 
+  // Whether the line after `ln` continues the currently open
+  // blockquotes (it matches every blockquote in the stack, in order,
+  // through any enclosing list items). A whitespace-only remainder is
+  // a blank line only then; when the next line leaves the blockquote
+  // (or there is none), the remainder is paragraph content
+  // (spec example 241: '> foo' followed by a trailing '>  ' is the
+  // paragraph 'foo\n ').
+  function nextLineContinuesBlockquotes(ln) {
+    if (ln + 1 >= lines.length) return false;
+    let s2 = lines[ln + 1];
+    let col2 = 0;
+    for (let k = 1; k < stack.length; k++) {
+      const e = stack[k];
+      if (e.type === 'blockquote') {
+        const ind = indentCols(s2, col2);
+        if (ind > 3) return false;
+        const t2 = stripCols(s2, ind, col2);
+        if (t2[0] !== '>') return false;
+        col2 += ind + 1;
+        s2 = t2.slice(1);
+        const run2 = /^[ \t]+/.exec(s2);
+        if (run2) {
+          s2 = expandLeading(run2[0], ind + 1).slice(1) + s2.slice(run2[0].length);
+          col2++;
+        }
+        continue;
+      }
+      if (e.type === 'item') {
+        if (s2 === '') return false;
+        if (indentCols(s2, col2) >= e.minIndent) {
+          s2 = stripCols(s2, e.minIndent, col2);
+          col2 += e.minIndent;
+          continue;
+        }
+        return false;
+      }
+      if (e.type === 'list') continue;
+      break;
+    }
+    return true;
+  }
+
   for (let ln = 0; ln < lines.length; ln++) {
     const line = lines[ln];
     nextLineRaw = ln + 1 < lines.length ? lines[ln + 1] : null;
@@ -2439,7 +2481,10 @@ function parseBlocks(lines, refs) {
     // A line that is only whitespace after its containers matched is a
     // blank line for an open paragraph (it ends the paragraph), but it
     // stays code content for a code block and a line of an HTML block.
-    if (/^[ \t]+$/.test(s) && failedAt < 0 && top().type === 'paragraph') {
+    // It is a blank line only when the next line continues the open
+    // blockquotes; a trailing one (or one followed by a line that
+    // leaves the blockquote) is paragraph content (spec example 241).
+    if (/^[ \t]+$/.test(s) && failedAt < 0 && top().type === 'paragraph' && nextLineContinuesBlockquotes(ln)) {
       closeLeaf();
       const t3 = top();
       if (t3.type === 'item') t3.node.blankAfter = true;
