@@ -8,6 +8,28 @@
 
 'use strict';
 
+// Document-level "inside a link" flag, leaked across blocks the way
+// marked's does: an inline <a ...> open tag sets it and only a </a>
+// close tag (as inline HTML, in any later paragraph) clears it. While
+// set, bare (extended) autolinks do not form; markdown links, <...>
+// autolinks, images and reference links are unaffected. Reset at the
+// start of every parse() call.
+let inLinkLeak = false;
+
+function htmlTagNameIsA(text) {
+  // Returns 'open' for <a ...>, 'close' for </a ...>, '' otherwise.
+  if (text.length < 2 || text[0] !== '<') return '';
+  let i = 1;
+  let close = false;
+  if (text[i] === '/') { close = true; i++; }
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
+  if (i >= text.length || !isAlpha(text[i])) return '';
+  if (text[i] !== 'a' && text[i] !== 'A') return '';
+  const after = text[i + 1];
+  if (after !== undefined && (isAlnum(after) || after === '-')) return '';
+  return close ? 'close' : 'open';
+}
+
 // ---------------------------------------------------------------- utilities
 
 const SPACE_RE = /[ \t\n\r\f\v]/;
@@ -211,6 +233,12 @@ function parseInline(src, refs) {
   let buf = '';
   let dHead = null;
   let dTail = null;
+  // Every '*' pair formed in this paragraph, in order: {openerPos,
+  // closerPos, closerLen, closerEnd, use}. Used by the marked quirk
+  // that an outer '*' pair fails (and a closer's leftover stars land
+  // inside it) when an inner '*' pair's closer is followed by an
+  // alphanumeric character.
+  const formedStar = [];
 
   function appendNode(node) {
     tail.next = node; node.prev = tail; tail = node;
@@ -303,12 +331,42 @@ function parseInline(src, refs) {
             const odd = (opener.canClose || closer.canOpen) &&
               ((opener.n + closer.n) % 3 === 0) &&
               (opener.n % 3 !== 0 || closer.n % 3 !== 0);
-            if (!odd) { found = opener; break; }
+            if (!odd) {
+              // Marked quirk: an outer '*' pair is blocked when an inner
+              // '*' pair has formed strictly between the opener and the
+              // closer and that inner pair's closer is immediately
+              // followed by an alphanumeric character. The block applies
+              // when the (opener, inner closer) pair or the (inner
+              // closer, outer closer) pair is a multiple of three in
+              // length (rule-of-three shape), and only while the outer
+              // closer's original run is at most 2 long.
+              let blocked = false;
+              if (closer.ch === '*') {
+                for (const p of formedStar) {
+                  if (p.openerPos > opener.pos && p.closerPos < closer.pos &&
+                      p.closerEnd < n && isAlnum(src[p.closerEnd]) &&
+                      (p.openerPos === 0 || !isAlnum(src[p.openerPos - 1]))) {
+                    const condA = ((opener.len + p.closerLen) % 3 === 0) &&
+                      (opener.len % 3 !== 0 || p.closerLen % 3 !== 0) &&
+                      (closer.len <= 2);
+                    const condB = (p.closerLen >= 2) &&
+                      ((p.closerLen + closer.len) % 3 === 0) &&
+                      (p.closerLen % 3 !== 0 || closer.len % 3 !== 0) &&
+                      (closer.len <= 2);
+                    if (condA || condB) { blocked = true; break; }
+                  }
+                }
+              }
+              if (!blocked) { found = opener; break; }
+            }
           }
           opener = opener.prev;
         }
         if (found) {
           const use = (found.n >= 2 && closer.n >= 2) ? 2 : 1;
+          if (closer.ch === '*') {
+            formedStar.push({ openerPos: found.pos, closerPos: closer.pos, closerLen: closer.len, closerEnd: closer.pos + closer.len, use });
+          }
           found.n -= use;
           closer.n -= use;
           found.node.n -= use;
@@ -320,7 +378,33 @@ function parseInline(src, refs) {
             removeDelim(d);
             d = nxt;
           }
-          wrapEmphasis(found.node, closer.node, use, closer.ch);
+          const wrapper = wrapEmphasis(found.node, closer.node, use, closer.ch);
+          // Leftover stars of a partially used closer land INSIDE the
+          // wrapper (before its closing tag) when an inner '*' pair
+          // whose closer is followed by an alphanumeric has
+          // (inner length + use) == 3 and the opener is exhausted and
+          // no earlier opener could still take the closer.
+          if (closer.ch === '*' && closer.n > 0 && found.n === 0) {
+            let inside = false;
+            for (const p of formedStar) {
+              if (p.openerPos > found.pos && p.closerPos < closer.pos &&
+                  p.closerEnd < n && isAlnum(src[p.closerEnd]) &&
+                  p.closerLen + use === 3) { inside = true; break; }
+            }
+            if (inside) {
+              let earlier = found.prev;
+              let hasEarlierOpener = false;
+              while (earlier && earlier !== stopNode) {
+                if (earlier.type === 'em' && earlier.ch === '*' && earlier.canOpen) { hasEarlierOpener = true; break; }
+                earlier = earlier.prev;
+              }
+              if (!hasEarlierOpener) {
+                wrapper.children.push({ t: 'text', s: '*'.repeat(closer.n), next: null, prev: null });
+                closer.n = 0;
+                closer.node.n = 0;
+              }
+            }
+          }
           if (found.n === 0) removeDelim(found);
           if (closer.n === 0) {
             removeDelim(closer);
@@ -864,6 +948,9 @@ function parseInline(src, refs) {
       const tag = matchHtmlTag(src, i);
       if (tag) {
         flushText();
+        const kind = htmlTagNameIsA(tag.text);
+        if (kind === 'open') inLinkLeak = true;
+        else if (kind === 'close') inLinkLeak = false;
         appendNode({ t: 'html', s: tag.text, next: null, prev: null });
         scanPos = tag.next;
         continue;
@@ -932,7 +1019,7 @@ function parseInline(src, refs) {
       flushText();
       const node = { t: 'delim', ch, n: run, next: null, prev: null };
       appendNode(node);
-      pushDelim({ type: 'em', ch, n: run, canOpen, canClose, node, prev: null, next: null });
+      pushDelim({ type: 'em', ch, n: run, canOpen, canClose, node, pos: i, len: run, prev: null, next: null });
       scanPos = k;
       continue;
     }
@@ -953,7 +1040,7 @@ function parseInline(src, refs) {
         flushText();
         const node = { t: 'delim', ch: '~', n: run, next: null, prev: null };
         appendNode(node);
-        pushDelim({ type: 'em', ch: '~', n: run, canOpen: leftFlanking, canClose: rightFlanking, node, prev: null, next: null });
+        pushDelim({ type: 'em', ch: '~', n: run, canOpen: leftFlanking, canClose: rightFlanking, node, pos: i, len: run, prev: null, next: null });
         scanPos = k;
         continue;
       }
@@ -985,8 +1072,9 @@ function parseInline(src, refs) {
       continue;
     }
 
-    // Extended autolinks (GFM): only where one may start.
-    if (isBoundaryBefore(i) && (isAlnum(ch))) {
+    // Extended autolinks (GFM): only where one may start, and never
+    // while the leaked in-link flag is set (an unclosed <a> above).
+    if (!inLinkLeak && isBoundaryBefore(i) && (isAlnum(ch))) {
       const a = tryExtAutolink(src, i);
       if (a) {
         flushText();
@@ -2061,6 +2149,7 @@ function renderItem(item, refs, loose) {
 // ---- entry point ---------------------------------------------------------------
 
 export function parse(markdown) {
+  inLinkLeak = false;
   const src = String(markdown).replace(/\r\n?/g, '\n');
   let lines = src.split('\n');
   if (lines.length && lines[lines.length - 1] === '') lines.pop();
