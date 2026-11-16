@@ -1503,11 +1503,11 @@ function parseBlocks(lines, refs) {
     if (isHrLine(s, col)) return true;
     if (t.startsWith('>')) return true;
     const li = parseListMarker(t, col + ind);
-    // A list marker can interrupt a paragraph when it is a bullet, when
-    // it is an ordered item starting at 1, or when a list is already
-    // open (then the marker is a new item or a new sibling list, even
-    // with a different delimiter or start number, and even when empty).
-    if (li && (!li.ordered || li.startNum === 1)) return true;
+    // A non-empty bullet, or a non-empty ordered item starting at 1,
+    // can interrupt a paragraph. Any marker (even empty, or ordered
+    // with another start or delimiter) can interrupt when a list is
+    // already open: it is a new item or a new sibling list.
+    if (li && !li.empty && (!li.ordered || li.startNum === 1)) return true;
     if (li) {
       for (let k = stack.length - 1; k >= 0; k--) {
         if (stack[k].type === 'list') return true;
@@ -1621,7 +1621,7 @@ function parseBlocks(lines, refs) {
       }
       if (!listNode) {
         listNode = {
-          type: 'list', ordered: li.ordered, start: li.startNum || 1,
+          type: 'list', ordered: li.ordered, start: li.startNum ?? 1,
           bulletChar: li.bulletChar, delimChar: li.delimChar,
           loose: false, items: [],
         };
@@ -1644,7 +1644,12 @@ function parseBlocks(lines, refs) {
         }
       }
       listNode.items.push(itemNode);
-      stack.push({ type: 'item', node: itemNode, contentIndent: li.contentIndent, blankAfter: false });
+      // minIndent: the indent a continuation line needs, measured from
+      // the start of the line's container content area. It is the
+      // content column minus the column where this line's content area
+      // starts, so it stays correct when blockquote prefixes differ in
+      // width from line to line.
+      stack.push({ type: 'item', node: itemNode, contentIndent: li.contentIndent, minIndent: li.contentIndent - col, blankAfter: false });
       if (li.empty) return 'leaf';
       cur = li.content;
       curCol = tCol + (t.length - li.content.length) + (li.contentIndent - tCol);
@@ -1736,10 +1741,21 @@ function parseBlocks(lines, refs) {
         break;
       }
       if (e.type === 'item') {
-        if (col + indentCols(s, col) >= e.contentIndent) {
-          const strip = Math.max(0, e.contentIndent - col);
-          s = stripCols(s, strip, col);
-          col = Math.max(col, e.contentIndent);
+        // A blank line is inside the item: the item stays open.
+        if (s === '') continue;
+        // An empty item followed by a blank line is closed: indented
+        // lines after the blank line are not part of it.
+        if (e.node.children.length === 0 && e.node.blankAfter) {
+          failStrip = indentCols(s, col);
+          failedAt = k;
+          break;
+        }
+        // A continuation line belongs to the item when its indent,
+        // measured from the container content area's start (col),
+        // reaches the item's minimum indent.
+        if (indentCols(s, col) >= e.minIndent) {
+          s = stripCols(s, e.minIndent, col);
+          col = col + e.minIndent;
           continue;
         }
         failStrip = indentCols(s, col);
