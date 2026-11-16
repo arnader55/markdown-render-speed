@@ -2349,6 +2349,11 @@ function parseBlocks(lines, refs) {
     let col = 0;
     let failedAt = -1;
     let failStrip = 0; // leading whitespace consumed before the failed match
+    // Items that matched only because of the fenced-code exception
+    // below (the line is code content even when under-indented): if a
+    // container then fails, the line is not code content after all,
+    // and the failure is really at the outermost such item.
+    const codeExceptionItems = [];
     for (let k = 1; k < stack.length; k++) {
       const e = stack[k];
       if (e.type === 'blockquote') {
@@ -2397,7 +2402,10 @@ function parseBlocks(lines, refs) {
         // first content line is outside the item is empty: the line
         // ends the item (and the fence) instead.
         const t0 = stack[stack.length - 1];
-        if (t0.type === 'code' && t0.fenced && t0.node.lines.some(l => l !== '')) continue;
+        if (t0.type === 'code' && t0.fenced && t0.node.lines.some(l => l !== '')) {
+          codeExceptionItems.push(k);
+          continue;
+        }
         failStrip = indentCols(s, col);
         failedAt = k;
         break;
@@ -2436,6 +2444,15 @@ function parseBlocks(lines, refs) {
       const t3 = top();
       if (t3.type === 'item') t3.node.blankAfter = true;
       continue;
+    }
+
+    // A line that fails a container is not fenced-code content: any
+    // item that only matched because of the fenced-code exception is
+    // outside the line, so the failure is really at the outermost
+    // such item. (Blank lines are handled above and do not close
+    // items, so this runs only for non-blank lines.)
+    if (failedAt >= 0 && codeExceptionItems.length > 0) {
+      failedAt = codeExceptionItems[0];
     }
 
     if (failedAt >= 0) {
