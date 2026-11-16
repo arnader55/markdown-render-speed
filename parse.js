@@ -346,6 +346,57 @@ function parseInline(src, refs) {
                   if (p.openerPos > opener.pos && p.closerPos < closer.pos &&
                       p.closerEnd < n && isAlnum(src[p.closerEnd]) &&
                       (p.openerPos === 0 || !isAlnum(src[p.openerPos - 1]))) {
+                    // Shield: a lone closer-only '*' strictly between
+                    // the inner pair's closer and this closer, with a
+                    // non-whitespace character after it, lifts the
+                    // block — but only when the inner pair is a single
+                    // '*' pair (closer length 1); the outer pair then
+                    // forms.
+                    let shielded = false;
+                    if (p.closerLen === 1) {
+                    let j = p.closerEnd;
+                    while (j < closer.pos) {
+                      const c2 = src[j];
+                      if (c2 === '\\' && j + 1 < closer.pos) { j += 2; continue; }
+                      if (c2 === '`') {
+                        let k = j;
+                        while (k < closer.pos && src[k] === '`') k++;
+                        const run = k - j;
+                        let fnd = -1;
+                        let m = k;
+                        while (m < closer.pos) {
+                          if (src[m] === '`') {
+                            let e = m;
+                            while (e < closer.pos && src[e] === '`') e++;
+                            if (e - m === run) { fnd = m; break; }
+                            m = e;
+                          } else m++;
+                        }
+                        if (fnd >= 0) { j = fnd + run; continue; }
+                        j = k; continue;
+                      }
+                      if (c2 === '*' && (j === 0 || src[j - 1] !== '*') &&
+                          (j + 1 >= closer.pos || src[j + 1] !== '*')) {
+                        const before = j > 0 ? src[j - 1] : '\n';
+                        const after = j + 1 < n ? src[j + 1] : '\n';
+                        if (!isUnicodeWhitespace(before) &&
+                            (isUnicodeWhitespace(after) || isPunct(after))) {
+                          let taken = false;
+                          for (const q of formedStar) {
+                            if (q.openerPos === j || q.closerPos === j) { taken = true; break; }
+                          }
+                          if (!taken) {
+                            for (let k = j + 1; k < closer.pos; k++) {
+                              if (!isUnicodeWhitespace(src[k])) { shielded = true; break; }
+                            }
+                          }
+                        }
+                        if (shielded) break;
+                      }
+                      j++;
+                    }
+                    }
+                    if (shielded) continue;
                     const condA = ((opener.len + p.closerLen) % 3 === 0) &&
                       (opener.len % 3 !== 0 || p.closerLen % 3 !== 0) &&
                       (closer.len <= 2);
@@ -873,6 +924,79 @@ function parseInline(src, refs) {
     return true;
   }
 
+  // Predict whether the nearest active bracket opener will form a link
+  // when its ']' is reached, scanning forward from `fromPos`. Extended
+  // autolinks do not form inside link text, so when the bracket will
+  // form, the caller leaves the URL as plain text. Returns false when
+  // the bracket will not form (no closer, no valid destination/label,
+  // or the text already holds a link node).
+  function bracketWillFormLink(opener, fromPos) {
+    // Find the ']' closing this opener, skipping code spans and
+    // tracking nested brackets.
+    let depth = 0;
+    let c = -1;
+    let j = fromPos;
+    while (j < n) {
+      const ch2 = src[j];
+      if (ch2 === '\\' && j + 1 < n) { j += 2; continue; }
+      if (ch2 === '`') {
+        let k = j;
+        while (k < n && src[k] === '`') k++;
+        const run = k - j;
+        let found = -1;
+        let m = k;
+        while (m < n) {
+          if (src[m] === '`') {
+            let e = m;
+            while (e < n && src[e] === '`') e++;
+            if (e - m === run) { found = m; break; }
+            m = e;
+          } else m++;
+        }
+        if (found >= 0) { j = found + run; continue; }
+        j = k; continue;
+      }
+      if (ch2 === '[') { depth++; j++; continue; }
+      if (ch2 === ']') {
+        if (depth === 0) { c = j; break; }
+        depth--; j++; continue;
+      }
+      j++;
+    }
+    if (c < 0) return false;
+    const after = c + 1;
+    let dest = null;
+    if (src[after] === '(') {
+      const r = parseInlineLinkRest(src, after);
+      if (r) dest = r.dest;
+    }
+    if (dest === null) {
+      let label = null;
+      if (src[after] === '[') {
+        const r = scanBracketLabel(src, after);
+        if (r) label = r.label;
+      }
+      if (label === null || label === '') {
+        label = src.slice(opener.pos + (opener.image ? 2 : 1), c);
+      }
+      const norm = normalizeLabel(label);
+      const ref = norm ? refs.get(norm) : undefined;
+      if (ref) dest = ref.dest;
+    }
+    if (dest === null) return false;
+    // A link may not contain another link (images exempt): if the text
+    // already scanned holds a link node, this opener cannot form.
+    if (!opener.image) {
+      const hasLink = (nodes) => nodes.some((nd) =>
+        nd.t === 'link' || (nd.children && hasLink(nd.children)));
+      const scanned = [];
+      let cur = opener.node.next;
+      while (cur !== null) { scanned.push(cur); cur = cur.next; }
+      if (hasLink(scanned)) return false;
+    }
+    return true;
+  }
+
   // ---- main scan ------------------------------------------------------------
 
   let scanPos = 0;
@@ -1073,14 +1197,25 @@ function parseInline(src, refs) {
     }
 
     // Extended autolinks (GFM): only where one may start, and never
-    // while the leaked in-link flag is set (an unclosed <a> above).
+    // while the leaked in-link flag is set (an unclosed <a> above),
+    // nor inside a bracket that will form a link (link text keeps the
+    // URL as plain text).
     if (!inLinkLeak && isBoundaryBefore(i) && (isAlnum(ch))) {
+      let inFormingBracket = false;
+      for (let d = dTail; d; d = d.prev) {
+        if (d.type === 'bracket' && d.active) {
+          inFormingBracket = bracketWillFormLink(d, i);
+          break;
+        }
+      }
+      if (!inFormingBracket) {
       const a = tryExtAutolink(src, i);
       if (a) {
         flushText();
         appendNode({ t: 'autolink', href: cleanUrl(a.href), text: a.text, next: null, prev: null });
         scanPos = a.next;
         continue;
+      }
       }
     }
 
