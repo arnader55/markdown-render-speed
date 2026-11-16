@@ -679,8 +679,9 @@ function parseInline(src, refs) {
         if (r) { label = r.label; next = r.next; }
       }
       if (label === null || label === '') {
-        // Shortcut or collapsed reference: the label is the link text itself.
-        label = src.slice(opener.pos + (opener.image ? 2 : 1), closerPos);
+        // Shortcut or collapsed reference: the label is the link text
+        // itself, with backslash escapes processed.
+        label = unescapePunct(src.slice(opener.pos + (opener.image ? 2 : 1), closerPos));
       }
       const norm = normalizeLabel(label);
       const ref = norm ? refs.get(norm) : undefined;
@@ -1115,19 +1116,33 @@ function parseDefAt(text, j) {
   k = skipSpacesAndNewlines(text, k);
   const d = scanDefDest(text, k);
   if (!d) return null;
-  k = skipSpacesAndNewlines(text, d.next);
+  k = d.next;
   let title = null;
-  if (text[k] === '"' || text[k] === "'" || text[k] === '(') {
-    const t = scanDefTitle(text, k);
-    if (!t) return null;
-    title = t.title;
-    k = t.next;
+  // Optional title: it must be separated from the destination by
+  // whitespace (space, tab, or newline), and the rest of the title's
+  // line must be blank. A malformed title does not kill the definition:
+  // the definition stands without a title and the title-looking text
+  // stays as paragraph content.
+  const k2 = skipSpacesAndNewlines(text, k);
+  if ((text[k2] === '"' || text[k2] === "'" || text[k2] === '(') && k2 > k) {
+    const t = scanDefTitle(text, k2);
+    if (t) {
+      let e = t.next;
+      while (e < n && (text[e] === ' ' || text[e] === '\t')) e++;
+      if (e >= n || text[e] === '\n') {
+        title = t.title;
+        k = e;
+      }
+    }
   }
-  // The rest of the line must be blank.
-  let e = k;
-  while (e < n && (text[e] === ' ' || text[e] === '\t')) e++;
-  if (e < n && text[e] !== '\n') return null;
-  return { label, dest: d.dest, title, next: e };
+  if (title === null) {
+    // No title: the rest of the destination's line must be blank.
+    let e = k;
+    while (e < n && (text[e] === ' ' || text[e] === '\t')) e++;
+    if (e < n && text[e] !== '\n') return null;
+    k = e;
+  }
+  return { label, dest: d.dest, title, next: k };
 }
 
 function scanDefTitle(text, i) {
@@ -1479,20 +1494,35 @@ function parseBlocks(lines, refs) {
     if (isHrLine(s, col)) return true;
     if (t.startsWith('>')) return true;
     const li = parseListMarker(t, col + ind);
-    if (li && (!li.ordered || li.startNum === 1)) return true;
+    // An empty list item cannot interrupt a paragraph.
+    if (li && !li.empty && (!li.ordered || li.startNum === 1)) return true;
     return false;
   }
 
-  // Convert an open paragraph to a setext heading in place.
+  // Convert an open paragraph to a setext heading in place. Returns
+  // false when the paragraph is empty after link definitions are
+  // extracted (then it is not a heading at all).
   function convertParagraphToHeading(e, level) {
     const node = e.node;
     const joined = node.lines.join('\n');
     const rest = extractLinkDefs(joined, refs);
+    const text = rest.replace(/^[ \t\n]+/, '').replace(/[ \t\n]+$/, '');
+    if (text === '') {
+      // No heading: drop the (empty) paragraph; the underline line is
+      // left for the caller to handle as a new paragraph.
+      stack.pop();
+      const parent = stack[stack.length - 1];
+      const arr = parent.node.children || parent.node.items;
+      const idx = arr.indexOf(node);
+      if (idx >= 0) arr.splice(idx, 1);
+      return false;
+    }
     node.type = 'heading';
     node.level = level;
-    node.text = rest.replace(/^[ \t\n]+/, '').replace(/[ \t\n]+$/, '');
+    node.text = text;
     delete node.lines;
     stack.pop();
+    return true;
   }
 
   // The current remaining line and its absolute column (updated by
@@ -1717,8 +1747,10 @@ function parseBlocks(lines, refs) {
       if (t.type === 'paragraph') {
         const setext = setextLevel(cur, curCol);
         if (setext) {
-          convertParagraphToHeading(t, setext);
-          break;
+          // An empty paragraph (only link definitions) is dropped and
+          // the underline becomes a paragraph of its own.
+          if (convertParagraphToHeading(t, setext)) break;
+          continue;
         }
         if (canInterruptParagraph(cur, curCol)) {
           closeLeaf(); // the paragraph ends; retry with it closed
