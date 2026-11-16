@@ -437,19 +437,20 @@ function parseInline(src, refs) {
   }
 
   // Scan a reference label starting at i ('['). Returns {label, next} or null.
+  // Scan a bracketed label starting at src[i] === '['. Returns
+  // {label, next} or null. Backslash escapes are kept literally in the
+  // label (so [foo\!] does not match a [foo!] definition), but an
+  // escaped ']' does not close the label. A label may not contain a
+  // nested '['.
   function scanBracketLabel(src, i) {
     const n2 = src.length;
     let k = i + 1;
-    let depth = 0;
     let label = '';
     while (k < n2) {
       const c = src[k];
-      if (c === '\\' && k + 1 < n2 && isAsciiPunct(src[k + 1])) { label += src[k + 1]; k += 2; continue; }
-      if (c === '[') { depth++; label += c; k++; continue; }
-      if (c === ']') {
-        if (depth === 0) return { label, next: k + 1 };
-        depth--; label += c; k++; continue;
-      }
+      if (c === '\\' && k + 1 < n2 && isAsciiPunct(src[k + 1])) { label += src[k] + src[k + 1]; k += 2; continue; }
+      if (c === '[') return null;
+      if (c === ']') return { label, next: k + 1 };
       label += c;
       k++;
       if (label.length > 999) return null;
@@ -476,6 +477,7 @@ function parseInline(src, refs) {
       else if (node.t === 'br') out += '\n';
       else if (node.t === 'entity') out += node.s;
       else if (node.t === 'autolink') out += node.text;
+      else if (node.t === 'image') out += node.alt;
       else if (node.children) out += textOf(node.children);
     }
     return out;
@@ -683,8 +685,9 @@ function parseInline(src, refs) {
       }
       if (label === null || label === '') {
         // Shortcut or collapsed reference: the label is the link text
-        // itself, with backslash escapes processed.
-        label = unescapePunct(src.slice(opener.pos + (opener.image ? 2 : 1), closerPos));
+        // itself, kept literally (backslash escapes are not processed
+        // for matching, so [foo\!] does not match a [foo!] definition).
+        label = src.slice(opener.pos + (opener.image ? 2 : 1), closerPos);
       }
       const norm = normalizeLabel(label);
       const ref = norm ? refs.get(norm) : undefined;
@@ -1111,24 +1114,22 @@ function scanDefDest(text, i) {
 // Parse one link reference definition at text[j] === '['. Returns
 // {label, dest, title, next} (next just past the definition) or null.
 function parseDefAt(text, j) {
-  // Label: '[' balanced-brackets ']' then ':'.
+  // Label: '[' ... ']' then ':'. A label may not contain a nested
+  // '[' and may not normalize to empty (a label of only whitespace).
   let k = j + 1;
-  let depth = 0;
   let label = '';
   const n = text.length;
   while (k < n) {
     const c = text[k];
-    if (c === '\\' && k + 1 < n && isAsciiPunct(text[k + 1])) { label += text[k + 1]; k += 2; continue; }
-    if (c === '[') { depth++; label += c; k++; continue; }
-    if (c === ']') {
-      if (depth === 0) break;
-      depth--; label += c; k++; continue;
-    }
+    if (c === '\\' && k + 1 < n && isAsciiPunct(text[k + 1])) { label += text[k] + text[k + 1]; k += 2; continue; }
+    if (c === '[') return null;
+    if (c === ']') break;
     label += c;
     k++;
     if (label.length > 999) return null;
   }
   if (k >= n || text[k] !== ']' || label.length === 0) return null;
+  if (normalizeLabel(label) === '') return null;
   k++;
   if (text[k] !== ':') return null;
   k++;
