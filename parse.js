@@ -1997,10 +1997,10 @@ function parseBlocks(lines, refs) {
 
   for (let ln = 0; ln < lines.length; ln++) {
     const line = lines[ln];
-    // Whether the line after this one is blank: an HTML block of kind
-    // 1-5 that ends here loses its trailing newline when a blank line
-    // follows it.
-    nextLineBlank = ln + 1 < lines.length && isBlankLine(lines[ln + 1]);
+    // Whether the line after this one is empty: an HTML block of kind
+    // 1-5 that ends here loses its trailing newline when an empty line
+    // follows it. A whitespace-only line does not count as empty here.
+    nextLineBlank = ln + 1 < lines.length && lines[ln + 1] === '';
     if (isBlankLine(line)) {
       const t = top();
       // Whether a blockquote is open: a raw blank line closes it (and
