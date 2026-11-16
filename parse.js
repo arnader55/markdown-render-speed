@@ -742,18 +742,11 @@ function parseInline(src, refs) {
     }
     // Collect the nodes between the opener and the end of the list (the
     // ']' itself is not a node): these become the link's children.
+    // Extended autolinks inside link text stay links.
     const children = [];
     let cur = opener.node.next;
     while (cur !== null) {
       const nxt = cur.next;
-      // Extended autolinks do not form inside link text: turn them back
-      // into literal text.
-      if (cur.t === 'autolink') {
-        cur.t = 'text';
-        cur.s = cur.text;
-        delete cur.href;
-        delete cur.text;
-      }
       children.push(cur);
       cur.prev = null; cur.next = null;
       cur = nxt;
@@ -1043,6 +1036,27 @@ function matchHtmlTag(src, i) {
 
 
 // ------------------------------------------------------------ block parsing
+
+// Expand leading tabs to spaces ONLY when the tab is partial (its
+// width to the next tab stop is under 4 columns); a full-width tab
+// stays a literal tab. Used for code-block content, where a tab at
+// column 3 (width 1) becomes one space but a tab at column 0 stays.
+function expandPartialTabs(s, startCol = 0) {
+  let col = startCol;
+  let i = 0;
+  let out = '';
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) {
+    if (s[i] === ' ') { out += ' '; col++; i++; }
+    else {
+      const next = (Math.floor(col / 4) + 1) * 4;
+      const width = next - col;
+      out += width === 4 ? '\t' : ' '.repeat(width);
+      col = next;
+      i++;
+    }
+  }
+  return out + s.slice(i);
+}
 
 // Columns of leading whitespace, counting from `startCol`: a space is 1
 // column, a tab advances to the next multiple of 4.
@@ -1925,13 +1939,15 @@ function parseBlocks(lines, refs) {
           if (m && m[1][0] === t.fenceCh && m[1].length >= t.fenceLen) closed = true;
         }
         if (closed) { closeLeaf(); break; }
-        t.node.lines.push(stripCols(cur, t.fenceIndent, curCol));
+        // Strip the fence indent, then expand a leading partial tab
+        // to spaces at its absolute tab stop.
+        t.node.lines.push(expandPartialTabs(stripCols(cur, t.fenceIndent, curCol), curCol + t.fenceIndent));
         break;
       }
       if (t.type === 'code' && !t.fenced) {
         // Indented code: a line with indent >= 4 continues it.
         if (indentCols(cur, curCol) >= 4) {
-          t.node.lines.push(stripCols(cur, 4, curCol));
+          t.node.lines.push(expandPartialTabs(stripCols(cur, 4, curCol), curCol + 4));
           break;
         }
         closeLeaf();
