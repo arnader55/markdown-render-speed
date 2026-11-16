@@ -334,8 +334,11 @@ function parseInline(src, refs) {
 
   // ---- link helpers -------------------------------------------------------
 
+  // Labels match case-insensitively under Unicode case folding: the
+  // sharp s (ß, ẞ) folds to 'ss' and the final sigma (ς) to 'σ'.
   function normalizeLabel(label) {
-    return label.replace(/\s+/g, ' ').trim().toLowerCase();
+    return label.replace(/\s+/g, ' ').trim().toLowerCase()
+      .replace(/ß/g, 'ss').replace(/ς/g, 'σ');
   }
 
   function skipSpaces(src, i) {
@@ -724,13 +727,26 @@ function parseInline(src, refs) {
       cur.prev = null; cur.next = null;
       cur = nxt;
     }
-    tail = opener.node;
-    // Deactivate earlier '[' openers: no nested links.
+    // A link may not contain another link: if the link text holds a
+    // link node, this opener cannot form a link. (An image may hold a
+    // link in its alt text, so images are exempt.)
     if (!opener.image) {
-      for (let d = opener.prev; d; d = d.prev) {
-        if (d.type === 'bracket') d.active = false;
+      const hasLink = (nodes) => nodes.some((nd) =>
+        nd.t === 'link' || (nd.children && hasLink(nd.children)));
+      if (hasLink(children)) {
+        // Restore the children to the main list and drop the opener.
+        let last = opener.node;
+        for (const ch of children) { last.next = ch; ch.prev = last; last = ch; }
+        tail = last;
+        removeDelim(opener);
+        return false;
       }
     }
+    tail = opener.node;
+    // (No deactivation of earlier '[' openers here: a link that would
+    // contain an already-formed link is rejected by the nested-link
+    // check above, and deactivating would hide the nearer opener from
+    // a later ']', letting an outer image close at the wrong bracket.)
     const linkNode = opener.image
       ? { t: 'image', href, title: cleanTitle, alt: textOf(children), next: null, prev: null }
       : { t: 'link', href, title: cleanTitle, children, next: null, prev: null };
@@ -1040,8 +1056,11 @@ function isBlankLine(s) {
   return /^[ \t]*$/.test(s);
 }
 
+// Labels match case-insensitively under Unicode case folding: the
+// sharp s (ß, ẞ) folds to 'ss' and the final sigma (ς) to 'σ'.
 function normalizeLabel(label) {
-  return label.replace(/\s+/g, ' ').trim().toLowerCase();
+  return label.replace(/\s+/g, ' ').trim().toLowerCase()
+    .replace(/ß/g, 'ss').replace(/ς/g, 'σ');
 }
 
 // Link reference definition parsing (used for paragraphs and setext
