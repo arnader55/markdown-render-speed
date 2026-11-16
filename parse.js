@@ -1421,6 +1421,12 @@ function parseBlocks(lines, refs) {
       if (container.node.children.length > 0 && listEntry && listEntry.type === 'list') listEntry.node.loose = true;
       container.node.blankAfter = false;
     }
+    // A blank line inside an ancestor item is spent once new content is
+    // added inside that item (as a descendant): it no longer separates
+    // the ancestor item from its next sibling.
+    for (let k = stack.indexOf(container) - 1; k >= 0; k--) {
+      if (stack[k].type === 'item') stack[k].node.blankAfter = false;
+    }
   }
   function removeFromParent(node) {
     const parent = deepestContainer().node;
@@ -1779,9 +1785,11 @@ function parseBlocks(lines, refs) {
         if (t2.kind >= 6) closeLeaf();
         else t2.node.lines.push(line);
       }
-      for (let k = stack.length - 1; k >= 0; k--) {
-        if (stack[k].type === 'item') stack[k].node.blankAfter = true;
-      }
+      // The blank line is directly in a list item only when the item is
+      // the innermost container left open; inside a blockquote it does
+      // not loosen the item's list.
+      const t3 = top();
+      if (t3.type === 'item') t3.node.blankAfter = true;
       continue;
     }
 
