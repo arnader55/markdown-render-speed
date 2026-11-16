@@ -1459,6 +1459,14 @@ function isBlankLine(s) {
   return /^[ \t]*$/.test(s);
 }
 
+// Remove up to n leading whitespace characters (spaces or tabs, each
+// counting as one) from s. Used for fenced-code fence-indent stripping.
+function stripWsChars(s, n) {
+  let i = 0;
+  while (i < s.length && i < n && (s[i] === ' ' || s[i] === '\t')) i++;
+  return s.slice(i);
+}
+
 // Labels match case-insensitively under Unicode case folding: the
 // sharp s (ß, ẞ) folds to 'ss' and the final sigma (ς) to 'σ'.
 function normalizeLabel(label) {
@@ -1995,7 +2003,7 @@ function parseBlocks(lines, refs) {
     if (fence) {
       const node = { type: 'code', fenced: true, info: fence.info, lines: [] };
       addChild(node);
-      stack.push({ type: 'code', node, fenced: true, fenceCh: fence.ch, fenceLen: fence.len, fenceIndent: ind });
+      stack.push({ type: 'code', node, fenced: true, fenceCh: fence.ch, fenceLen: fence.len, fenceIndent: ind, fenceIndentChars: (/^[ \t]*/.exec(s) || [''])[0].length });
       return 'leaf';
     }
     const html = htmlBlockStart(t);
@@ -2088,8 +2096,15 @@ function parseBlocks(lines, refs) {
       stack.push({ type: 'blockquote', node });
       let rest = t.slice(1);
       let rCol = tCol + 1;
-      if (rest[0] === ' ') { rest = rest.slice(1); rCol++; }
-      else if (rest[0] === '\t') { rest = '   ' + rest.slice(1); rCol++; }
+      // The whitespace after '>': expand its tabs to spaces with tab
+      // stops counted from the marker (the '>' sits at relative column
+      // `ind`), then drop the one optional space. A tab right after '>'
+      // at relative column 1 leaves two spaces, not three.
+      const run = /^[ \t]+/.exec(rest);
+      if (run) {
+        rest = expandLeading(run[0], ind + 1).slice(1) + rest.slice(run[0].length);
+        rCol++;
+      }
       cur = rest;
       curCol = rCol;
       return 'container';
@@ -2161,9 +2176,14 @@ function parseBlocks(lines, refs) {
           if (t2[0] === '>') {
             col += ind + 1;
             s = t2.slice(1);
-            // The optional space after '>': one column, even of a tab.
-            if (s[0] === ' ') { s = s.slice(1); col++; }
-            else if (s[0] === '\t') { s = '   ' + s.slice(1); col++; }
+            // The whitespace after '>': expand its tabs to spaces with
+            // tab stops counted from the marker (the '>' sits at
+            // relative column `ind`), then drop the one optional space.
+            const run2 = /^[ \t]+/.exec(s);
+            if (run2) {
+              s = expandLeading(run2[0], ind + 1).slice(1) + s.slice(run2[0].length);
+              col++;
+            }
             continue;
           }
         }
@@ -2304,12 +2324,17 @@ function parseBlocks(lines, refs) {
         }
         if (closed) { closeLeaf(); break; }
         // Strip the fence indent, then expand leading tabs to spaces
-        // at their absolute tab stops. Inside a container (a list item
-        // or blockquote, curCol > 0) every leading tab expands; at the
-        // top level a tab in fenced code stays a literal tab.
-        const stripped = stripCols(cur, t.fenceIndent, curCol);
+        // at their absolute tab stops. A backtick fence removes up to
+        // fenceIndentChars leading whitespace characters from each
+        // content line (a tab counts as one character); a tilde fence
+        // removes nothing. Inside a container (a list item or
+        // blockquote, curCol > 0) every remaining leading tab expands;
+        // at the top level a tab in fenced code stays a literal tab.
+        const stripped = t.fenceCh === '`'
+          ? stripWsChars(cur, t.fenceIndentChars || 0)
+          : cur;
         t.node.lines.push(curCol > 0
-          ? expandLeading(stripped, curCol + t.fenceIndent)
+          ? expandLeading(stripped, curCol + (t.fenceIndentChars || 0))
           : stripped);
         break;
       }
