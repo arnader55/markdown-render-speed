@@ -858,12 +858,15 @@ function parseInline(src, refs) {
         j--; continue;
       }
       if (c === ')') {
-        let open = 0, close = 0;
-        for (let k = start; k < j; k++) {
-          if (src[k] === '(') open++;
-          else if (src[k] === ')') close++;
+        // Trim a trailing ')' only when it has no unmatched '('
+        // before it. Track depth left to right (an unmatched ')'
+        // in the middle does not consume an opener).
+        let depth = 0;
+        for (let k = start; k < j - 1; k++) {
+          if (src[k] === '(') depth++;
+          else if (src[k] === ')' && depth > 0) depth--;
         }
-        if (close > open) { j--; continue; }
+        if (depth === 0) { j--; continue; }
       }
       break;
     }
