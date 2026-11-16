@@ -2190,11 +2190,12 @@ function parseBlocks(lines, refs) {
           continue;
         }
         // Inside a fenced code block, a line is code content even when
-        // it is not indented to the item's content level: the block
-        // runs to its closing fence, so do not close the item (or the
-        // code block) for such a line.
+        // it is not indented to the item's content level — but only
+        // once the block has a non-blank content line. A fence whose
+        // first content line is outside the item is empty: the line
+        // ends the item (and the fence) instead.
         const t0 = stack[stack.length - 1];
-        if (t0.type === 'code' && t0.fenced) continue;
+        if (t0.type === 'code' && t0.fenced && t0.node.lines.some(l => l !== '')) continue;
         failStrip = indentCols(s, col);
         failedAt = k;
         break;
