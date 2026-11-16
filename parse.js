@@ -18,6 +18,10 @@ let inLinkLeak = false;
 
 function htmlTagNameIsA(text) {
   // Returns 'open' for <a ...>, 'close' for </a ...>, '' otherwise.
+  // marked only treats an <a> open tag as a link when a literal space
+  // follows the 'a' (so <a>, <a/> and <a\thref=...> do not set the
+  // leak); a close tag clears it when it is bare </a> or carries an
+  // attribute (</a href=...>), but not </a > or </a\t>.
   if (text.length < 2 || text[0] !== '<') return '';
   let i = 1;
   let close = false;
@@ -27,7 +31,15 @@ function htmlTagNameIsA(text) {
   if (text[i] !== 'a' && text[i] !== 'A') return '';
   const after = text[i + 1];
   if (after !== undefined && (isAlnum(after) || after === '-')) return '';
-  return close ? 'close' : 'open';
+  if (!close) {
+    // Open tag: only <a followed by a literal space counts.
+    return after === ' ' ? 'open' : '';
+  }
+  // Close tag: bare </a> counts; </a ...> counts only when an
+  // attribute name follows the space.
+  if (after === '>') return 'close';
+  if (after === ' ' && text[i + 2] !== undefined && text[i + 2] !== '>') return 'close';
+  return '';
 }
 
 // ---------------------------------------------------------------- utilities
