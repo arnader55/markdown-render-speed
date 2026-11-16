@@ -812,8 +812,20 @@ function parseInline(src, refs) {
     if (at < 0 || at === i) return null;
     const dEnd = scanDomain(src, at + 1);
     if (dEnd < 0) return null;
-    // The character after the domain must not extend it.
-    if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-' || src[dEnd] === '_' || src[dEnd] === '+')) return null;
+    // The character after the domain must not extend it. A '_' is
+    // allowed when it closes an open '_' emphasis delimiter (e.g. the
+    // closing '__' of __better an@x.com__); otherwise it extends or
+    // breaks the address.
+    if (dEnd < n2 && (isAlnum(src[dEnd]) || src[dEnd] === '-' || src[dEnd] === '_' || src[dEnd] === '+')) {
+      if (src[dEnd] === '_') {
+        let openUnderscore = false;
+        for (let d = dTail; d; d = d.prev) {
+          if (d.type === 'em' && d.ch === '_') { openUnderscore = true; break; }
+        }
+        if (openUnderscore) return { text: src.slice(i, dEnd), next: dEnd };
+      }
+      return null;
+    }
     return { text: src.slice(i, dEnd), next: dEnd };
   }
 
@@ -848,6 +860,51 @@ function parseInline(src, refs) {
 
   // ---- link formation ------------------------------------------------------
 
+  // Whether a link's raw text (between '[' and ']') can form a link.
+  // The text is a run of atoms: an escape, a nested '[...]' (no ']'
+  // inside), any character except '[', ']' or backtick, or a code span
+  // (one or more backticks, content with no backtick, one or more
+  // backticks; the opener and closer runs may differ in length).
+  // A trailing run of two or more backticks is allowed; a lone
+  // backtick, or a code span whose content holds a backtick, breaks
+  // the link.
+  function validLinkText(text) {
+    const n = text.length;
+    let i = 0;
+    while (i < n) {
+      // A trailing run of two or more backticks is allowed.
+      if (text[i] === '`') {
+        let k = i;
+        while (k < n && text[k] === '`') k++;
+        if (k === n && k - i >= 2) return true;
+      }
+      const c = text[i];
+      if (c === '\\' && i + 1 < n) { i += 2; continue; }
+      if (c === '[') {
+        let j = i + 1;
+        while (j < n && text[j] !== ']') j++;
+        if (j < n) { i = j + 1; continue; }
+        return false;
+      }
+      if (c === '`') {
+        // A code span: opening run, content with no backtick, then
+        // the next backtick run (any length) closes it.
+        let k = i;
+        while (k < n && text[k] === '`') k++;
+        let j = k;
+        while (j < n && text[j] !== '`') j++;
+        if (j >= n) return false;
+        let e = j;
+        while (e < n && text[e] === '`') e++;
+        i = e;
+        continue;
+      }
+      if (c === ']') return false;
+      i++;
+    }
+    return true;
+  }
+
   function tryFormLink(closerPos) {
     // Nearest active '[' or '![' delimiter.
     let opener = null;
@@ -857,11 +914,12 @@ function parseInline(src, refs) {
     if (!opener) return false;
     let dest = null;
     let title = null;
+    let isInline = false;
     let next = closerPos + 1; // shortcut reference: continue after ']'
     const after = closerPos + 1;
     if (src[after] === '(') {
       const r = parseInlineLinkRest(src, after);
-      if (r) { dest = r.dest; title = r.title; next = r.next; }
+      if (r) { dest = r.dest; title = r.title; next = r.next; isInline = true; }
     }
     if (dest === null) {
       let label = null;
@@ -881,6 +939,21 @@ function parseInline(src, refs) {
     }
     if (dest === null) {
       // No link: the opener can pair with nothing later.
+      removeDelim(opener);
+      return false;
+    }
+    // A code span whose content holds a backtick, or a lone backtick,
+    // in the link text breaks the link (the text stays literal). For
+    // an inline link, emphasis inside the text is suppressed as well;
+    // for a reference link it still forms.
+    if (!validLinkText(src.slice(opener.pos + (opener.image ? 2 : 1), closerPos))) {
+      if (isInline) {
+        const ems = [];
+        for (let d = opener.next; d; d = d.next) {
+          if (d.type === 'em') ems.push(d);
+        }
+        for (const d of ems) removeDelim(d);
+      }
       removeDelim(opener);
       return false;
     }
@@ -1007,6 +1080,9 @@ function parseInline(src, refs) {
       if (ref) dest = ref.dest;
     }
     if (dest === null) return false;
+    // A code span whose content holds a backtick, or a lone backtick,
+    // in the link text breaks the link.
+    if (!validLinkText(src.slice(opener.pos + (opener.image ? 2 : 1), c))) return false;
     // A link may not contain another link (images exempt): if the text
     // already scanned holds a link node, this opener cannot form.
     if (!opener.image) {
@@ -1026,7 +1102,7 @@ function parseInline(src, refs) {
   function isBoundaryBefore(i) {
     if (i === 0) return true;
     const c = src[i - 1];
-    return isSpace(c) || c === '(' || c === '[' || c === '<';
+    return isSpace(c) || c === '(' || c === '[' || c === '<' || c === '*' || c === '_';
   }
 
   while (scanPos < n) {
