@@ -1659,22 +1659,33 @@ function parseBlocks(lines, refs) {
     nextLineBlank = ln + 1 < lines.length && isBlankLine(lines[ln + 1]);
     if (isBlankLine(line)) {
       const t = top();
-      if (t.type === 'paragraph') closeLeaf();
-      else if (t.type === 'code') {
+      // Whether a blockquote is open: a raw blank line closes it (and
+      // everything inside it); a list is not closed by a blank line.
+      let bqIdx = -1;
+      for (let k = stack.length - 1; k >= 0; k--) {
+        if (stack[k].type === 'blockquote') { bqIdx = k; break; }
+      }
+      if (t.type === 'html' && t.kind < 6) {
+        // HTML blocks of kinds 1-5 run to their end marker: a blank
+        // line joins the block and closes no container.
+        t.node.lines.push(line);
+      } else if (bqIdx >= 0) {
+        closeFrom(bqIdx);
+      } else if (t.type === 'paragraph') {
+        closeLeaf();
+      } else if (t.type === 'code') {
         // A blank line in a code block keeps its whitespace past the
         // block's indent (four columns for indented code, the fence's
         // indent for fenced code).
         t.node.lines.push(stripCols(line, t.fenced ? (t.fenceIndent || 0) : 4, 0));
-      }
-      else if (t.type === 'html') {
-        // Only kinds 6 and 7 end at a blank line; kinds 1-5 run to
-        // their end marker, so a blank line joins the block.
-        if (t.kind >= 6) closeLeaf();
-        else t.node.lines.push(line);
+      } else if (t.type === 'html') {
+        // Only kinds 6 and 7 end at a blank line.
+        closeLeaf();
       }
       // A blank line inside a list item: remember it for tight/loose.
       // (Not for blank lines that belong to a code block's content.)
-      if (t.type !== 'code') {
+      const codeContent = t.type === 'code' && bqIdx < 0;
+      if (!codeContent) {
         for (let k = stack.length - 1; k >= 0; k--) {
           if (stack[k].type === 'item' && stack[k].node.children.length) stack[k].blankAfter = true;
         }
@@ -1720,6 +1731,25 @@ function parseBlocks(lines, refs) {
       }
       if (e.type === 'list') continue;
       break; // a leaf block: no container matching below it
+    }
+
+    // A line that is empty after its containers matched is a blank
+    // line inside those containers: it ends the open paragraph (or
+    // code/html block) but the containers stay open. A whitespace-only
+    // remainder is NOT blank: it joins the paragraph as a line of spaces.
+    if (s === '') {
+      if (failedAt >= 0) closeFrom(failedAt);
+      const t2 = top();
+      if (t2.type === 'paragraph') closeLeaf();
+      else if (t2.type === 'code') t2.node.lines.push('');
+      else if (t2.type === 'html') {
+        if (t2.kind >= 6) closeLeaf();
+        else t2.node.lines.push(line);
+      }
+      for (let k = stack.length - 1; k >= 0; k--) {
+        if (stack[k].type === 'item' && stack[k].node.children.length) stack[k].blankAfter = true;
+      }
+      continue;
     }
 
     if (failedAt >= 0) {
@@ -1791,6 +1821,9 @@ function parseBlocks(lines, refs) {
         // branch above.
         break;
       }
+      // After a container was started, the line may be empty: it is a
+      // blank line within that container, not a paragraph.
+      if (cur === '') break;
       const started = tryStartBlock(cur, false, curCol);
       if (started === 'container') continue;
       if (started === 'leaf') break;
