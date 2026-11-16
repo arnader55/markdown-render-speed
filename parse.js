@@ -287,8 +287,12 @@ function parseInline(src, refs) {
   // null to run to the head. Walks closers from the end, matching each
   // with the nearest earlier opener of the same character.
   function processEmphasis(tailNode, stopNode) {
-    let closer = tailNode;
-    while (closer && closer !== stopNode) {
+    // Closers are processed left to right (document order): each closer
+    // takes the nearest preceding opener that the odd-match rule allows.
+    const end = tailNode ? tailNode.next : null;
+    let closer = stopNode ? stopNode.next : dHead;
+    while (closer && closer !== end) {
+      const next = closer.next;
       if (closer.type === 'em' && closer.canClose) {
         let opener = closer.prev;
         let found = null;
@@ -317,14 +321,14 @@ function parseInline(src, refs) {
           wrapEmphasis(found.node, closer.node, use, closer.ch);
           if (found.n === 0) removeDelim(found);
           if (closer.n === 0) {
-            const prev = closer.prev;
             removeDelim(closer);
-            closer = prev;
+            closer = next;
           }
-          continue; // same closer again if it still has length
+          // Otherwise the closer still has length: retry it.
+          continue;
         }
       }
-      closer = closer.prev;
+      closer = next;
     }
   }
 
@@ -1362,7 +1366,8 @@ function canInterruptParagraph(s) {
   if (isThematicBreak(s)) return true;
   if (/^ {0,3}>/.test(s)) return true;
   const li = parseListMarker(s);
-  if (li && (!li.ordered || li.startNum === 1)) return true;
+  // An empty list item cannot interrupt a paragraph.
+  if (li && !li.empty && (!li.ordered || li.startNum === 1)) return true;
   return false;
 }
 
