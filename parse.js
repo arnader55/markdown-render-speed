@@ -941,12 +941,14 @@ function parseInline(src, refs) {
     return true;
   }
 
-  // Whether a link's raw text holds a code-span pair (read the way a
-  // label reads it: a backtick run, content with no backtick, then the
-  // next backtick run of any length) with exactly one of the two runs
-  // of length 1. Such a link casts the bt-link shadow (see
-  // processEmphasis).
+  // Whether a link's raw text casts the bt-link shadow (see
+  // processEmphasis): simulate inline code-span pairing over the
+  // text (a run pairs with the next run of the same length when the
+  // content between them is non-empty; the runs inside a formed span
+  // are consumed). The shadow is cast when a run of length 1 is left
+  // over unpaired.
   function linkTextHasSingleMismatch(text) {
+    const runs = [];
     let j = 0;
     while (j < text.length) {
       const c = text[j];
@@ -954,16 +956,24 @@ function parseInline(src, refs) {
       if (c === '`') {
         let k = j;
         while (k < text.length && text[k] === '`') k++;
-        const o = k - j;
-        let m = k;
-        while (m < text.length && text[m] !== '`') m++;
-        if (m >= text.length) return false;
-        let e = m;
-        while (e < text.length && text[e] === '`') e++;
-        if ((o === 1) !== (e - m === 1)) return true;
-        j = e; continue;
+        runs.push([j, k]);
+        j = k; continue;
       }
       j++;
+    }
+    const used = new Array(runs.length).fill(false);
+    for (let a = 0; a < runs.length; a++) {
+      if (used[a]) continue;
+      let paired = false;
+      for (let b = a + 1; b < runs.length; b++) {
+        if (used[b]) continue;
+        if (runs[b][1] - runs[b][0] !== runs[a][1] - runs[a][0]) continue;
+        if (runs[b][0] <= runs[a][1]) continue; // empty content
+        for (let c = a; c <= b; c++) used[c] = true;
+        paired = true;
+        break;
+      }
+      if (!paired && runs[a][1] - runs[a][0] === 1) return true;
     }
     return false;
   }
@@ -1300,12 +1310,13 @@ function parseInline(src, refs) {
       }
       if (found >= 0) {
         // A code span must not swallow the ']' that closes an active
-        // link bracket: when the bracket's closer lies before this
-        // span's closing run, the backticks stay literal.
+        // link bracket: when the bracket's closer lies strictly
+        // between this span's opening and closing runs, the backticks
+        // stay literal.
         const opener = nearestBracket();
         if (opener) {
           const closer = findBracketCloser(opener);
-          if (closer >= 0 && found > closer) {
+          if (closer >= 0 && i < closer && closer < found) {
             buf += '`'.repeat(run);
             scanPos = k;
             continue;
