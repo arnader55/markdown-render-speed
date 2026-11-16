@@ -881,9 +881,15 @@ function parseInline(src, refs) {
       const c = text[i];
       if (c === '\\' && i + 1 < n) { i += 2; continue; }
       if (c === '[') {
+        // A nested bracket pair, balanced to any depth.
+        let depth = 1;
         let j = i + 1;
-        while (j < n && text[j] !== ']') j++;
-        if (j < n) { i = j + 1; continue; }
+        while (j < n && depth > 0) {
+          if (text[j] === '[') depth++;
+          else if (text[j] === ']') depth--;
+          j++;
+        }
+        if (depth === 0) { i = j; continue; }
         return false;
       }
       if (c === '`') {
@@ -1102,7 +1108,15 @@ function parseInline(src, refs) {
   function isBoundaryBefore(i) {
     if (i === 0) return true;
     const c = src[i - 1];
-    return isSpace(c) || c === '(' || c === '[' || c === '<' || c === '*' || c === '_';
+    if (isSpace(c) || c === '(' || c === '[' || c === '<') return true;
+    // '*' and '_' only count as a boundary when they are not
+    // intra-word (the char before them is not alphanumeric), so an
+    // email inside **...** or _..._ autolinks but a.b-c_d@a.b_ does not.
+    if (c === '*' || c === '_') {
+      if (i - 2 < 0) return true;
+      return !isAlnum(src[i - 2]);
+    }
+    return false;
   }
 
   while (scanPos < n) {
