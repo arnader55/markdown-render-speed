@@ -2162,9 +2162,14 @@ function parseBlocks(lines, refs) {
           if (m && m[1][0] === t.fenceCh && m[1].length >= t.fenceLen) closed = true;
         }
         if (closed) { closeLeaf(); break; }
-        // Strip the fence indent, then expand a leading partial tab
-        // to spaces at its absolute tab stop.
-        t.node.lines.push(expandPartialTabs(stripCols(cur, t.fenceIndent, curCol), curCol + t.fenceIndent));
+        // Strip the fence indent, then expand leading tabs to spaces
+        // at their absolute tab stops. Inside a container (a list item
+        // or blockquote, curCol > 0) every leading tab expands; at the
+        // top level a tab in fenced code stays a literal tab.
+        const stripped = stripCols(cur, t.fenceIndent, curCol);
+        t.node.lines.push(curCol > 0
+          ? expandLeading(stripped, curCol + t.fenceIndent)
+          : stripped);
         break;
       }
       if (t.type === 'code' && !t.fenced) {
