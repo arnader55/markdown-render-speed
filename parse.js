@@ -2494,9 +2494,13 @@ function parseBlocks(lines, refs) {
     // A line that fails a container is not fenced-code content: any
     // item that only matched because of the fenced-code exception is
     // outside the line, so the failure is really at the outermost
-    // such item. (Blank lines are handled above and do not close
-    // items, so this runs only for non-blank lines.)
-    if (failedAt >= 0 && codeExceptionItems.length > 0) {
+    // such item — but only when the failing line starts a new list
+    // item. A plain paragraph line (e.g. `const y = 1;` after a
+    // failed blockquote fence) stays inside the innermost item as
+    // paragraph content. A thematic break is not a list item either.
+    // (Blank lines are handled above and do not close items, so this
+    // runs only for non-blank lines.)
+    if (failedAt >= 0 && codeExceptionItems.length > 0 && parseListMarker(s, col) && !isThematicBreak(s)) {
       failedAt = codeExceptionItems[0];
     }
 
