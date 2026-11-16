@@ -742,10 +742,7 @@ function parseInline(src, refs) {
       if (end < 0) return null;
       // The character after the domain must not extend it.
       if (end < n2 && (isAlnum(src[end]) || src[end] === '-')) return null;
-      let j = end;
-      if (src[j] === '/') {
-        j = scanAutolinkPath(src, j);
-      }
+      let j = scanAutolinkPath(src, end);
       j = trimAutolinkEnd(src, i, j);
       if (j <= i + 4) return null;
       const text = src.slice(i, j);
