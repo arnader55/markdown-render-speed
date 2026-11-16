@@ -1412,12 +1412,14 @@ function parseBlocks(lines, refs) {
       container = stack[idx - 1];
     }
     container.node.children.push(node);
-    // A blank line before this block inside a list item makes the list loose.
-    if (container.type === 'item' && container.blankAfter) {
+    // A blank line before this block inside a list item makes the list
+    // loose, but only when the item already has a block: a blank line
+    // before the item's first block does not loosen it.
+    if (container.type === 'item' && container.node.blankAfter) {
       const idx = stack.indexOf(container);
       const listEntry = stack[idx - 1];
-      if (listEntry && listEntry.type === 'list') listEntry.node.loose = true;
-      container.blankAfter = false;
+      if (container.node.children.length > 0 && listEntry && listEntry.type === 'list') listEntry.node.loose = true;
+      container.node.blankAfter = false;
     }
   }
   function removeFromParent(node) {
@@ -1450,7 +1452,14 @@ function parseBlocks(lines, refs) {
     if (e.type === 'paragraph') closeParagraph(e);
     else if (e.type === 'code') {
       const lines2 = e.node.lines;
-      while (lines2.length && lines2[lines2.length - 1] === '') lines2.pop();
+      if (e.fenced) {
+        // A fenced code block drops exactly one trailing empty line
+        // (the line terminator before the closing fence).
+        if (lines2.length && lines2[lines2.length - 1] === '') lines2.pop();
+      } else {
+        // An indented code block drops all trailing blank lines.
+        while (lines2.length && lines2[lines2.length - 1] === '') lines2.pop();
+      }
       e.node.text = lines2.join('\n') + (lines2.length ? '\n' : '');
     }
     // html blocks need no finalizing
@@ -1494,8 +1503,16 @@ function parseBlocks(lines, refs) {
     if (isHrLine(s, col)) return true;
     if (t.startsWith('>')) return true;
     const li = parseListMarker(t, col + ind);
-    // An empty list item cannot interrupt a paragraph.
-    if (li && !li.empty && (!li.ordered || li.startNum === 1)) return true;
+    // A list marker can interrupt a paragraph when it is a bullet, when
+    // it is an ordered item starting at 1, or when a list is already
+    // open (then the marker is a new item or a new sibling list, even
+    // with a different delimiter or start number, and even when empty).
+    if (li && (!li.ordered || li.startNum === 1)) return true;
+    if (li) {
+      for (let k = stack.length - 1; k >= 0; k--) {
+        if (stack[k].type === 'list') return true;
+      }
+    }
     return false;
   }
 
@@ -1617,7 +1634,7 @@ function parseBlocks(lines, refs) {
         const prevItem = items[items.length - 1];
         if (prevItem.blankAfter) { listNode.loose = true; prevItem.blankAfter = false; }
       }
-      const itemNode = { type: 'item', children: [], task: null };
+      const itemNode = { type: 'item', children: [], task: null, blankAfter: false };
       if (!li.empty) {
         const taskM = /^(\[[ xX]\])(?:[ \t]+(.*)|[ \t]*)$/.exec(li.content);
         if (taskM) {
@@ -1687,7 +1704,7 @@ function parseBlocks(lines, refs) {
       const codeContent = t.type === 'code' && bqIdx < 0;
       if (!codeContent) {
         for (let k = stack.length - 1; k >= 0; k--) {
-          if (stack[k].type === 'item' && stack[k].node.children.length) stack[k].blankAfter = true;
+          if (stack[k].type === 'item') stack[k].node.blankAfter = true;
         }
       }
       continue;
@@ -1747,7 +1764,7 @@ function parseBlocks(lines, refs) {
         else t2.node.lines.push(line);
       }
       for (let k = stack.length - 1; k >= 0; k--) {
-        if (stack[k].type === 'item' && stack[k].node.children.length) stack[k].blankAfter = true;
+        if (stack[k].type === 'item') stack[k].node.blankAfter = true;
       }
       continue;
     }
